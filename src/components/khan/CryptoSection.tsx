@@ -5,6 +5,7 @@ import { Star, X, ChevronDown, Search } from 'lucide-react';
 import { toast } from 'sonner';
 import { useAuth } from './AuthProvider';
 import { useCryptoFeed, CoinBadge, ChangeTag, fmtPrice, fmtBig, CryptoAsset } from './Ticker';
+import { CryptoBuyLinks } from './BuyLinks';
 
 export default function CryptoSection({ onAskKhan }: { onAskKhan: (q: string) => void }) {
   const { assets, source } = useCryptoFeed();
@@ -138,6 +139,9 @@ export default function CryptoSection({ onAskKhan }: { onAskKhan: (q: string) =>
                       </span>
                     ))}
                   </div>
+                  <div className="mb-3">
+                    <CryptoBuyLinks symbol={a.symbol} name={a.name} />
+                  </div>
                   <button
                     onClick={() => onAskKhan(`Give me a full trading analysis of ${a.name} (${a.symbol.toUpperCase()}) right now: current read, key support & resistance, momentum, bull vs bear case and your verdict with confidence.`)}
                     className="khan-btn-cyan w-full py-2.5 text-sm"
@@ -151,7 +155,7 @@ export default function CryptoSection({ onAskKhan }: { onAskKhan: (q: string) =>
                 onClick={() => setExpanded(open ? null : a.id)}
                 className="font-mono-khan flex items-center gap-1 text-[12px] text-[var(--khan-muted)] transition-colors hover:text-[var(--khan-cyan)]"
               >
-                {open ? 'Hide details' : 'About this coin'}
+                {open ? 'Hide details' : 'Buy / about this coin ↓'}
                 <ChevronDown size={13} className={`transition-transform ${open ? 'rotate-180' : ''}`} />
               </button>
             </article>
@@ -211,14 +215,24 @@ function BtcSpotlight({ btc, onAskKhan }: { btc: CryptoAsset; onAskKhan: (q: str
           >
             KHAN, analyze Bitcoin now →
           </button>
-          <button
-            onClick={() => onAskKhan('Explain Bitcoin simply for a complete beginner: what it is, why it has value, and how to start investing safely with small amounts.')}
-            className="khan-btn-ghost w-full py-3 text-[15px] font-semibold"
+          <a
+            href="https://www.binance.com/en/trade/BTC_USDT"
+            target="_blank"
+            rel="noopener noreferrer nofollow"
+            className="khan-btn-cyan flex w-full items-center justify-center gap-2 py-3 text-[15px]"
           >
-            Explain Bitcoin like I&apos;m new
-          </button>
+            Buy Bitcoin on Binance ↗
+          </a>
+          <a
+            href="https://coindcx.com/trading/BTCUSDT"
+            target="_blank"
+            rel="noopener noreferrer nofollow"
+            className="khan-btn-ghost flex w-full items-center justify-center gap-2 py-3 text-[15px] font-semibold"
+          >
+            Buy BTC with ₹ on CoinDCX ↗
+          </a>
           <p className="text-center font-mono-khan text-[11px] text-[var(--khan-muted)]">
-            Free · no account needed to ask
+            Opens third-party exchange · KYC required · invest safely
           </p>
         </div>
       </div>

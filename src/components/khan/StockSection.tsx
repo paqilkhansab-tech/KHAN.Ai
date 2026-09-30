@@ -5,6 +5,7 @@ import { ArrowUpRight, Activity, Search, Star, X } from 'lucide-react';
 import { toast } from 'sonner';
 import { useAuth } from './AuthProvider';
 import { useStockFeed, fmtStockPrice, ChangeTag } from './Ticker';
+import { StockBuyLinks } from './BuyLinks';
 
 interface StockAsset {
   symbol: string; name: string; sector: string; price: number; changePct: number; volume: string;
@@ -268,6 +269,9 @@ export default function StockSection({ onAskKhan }: { onAskKhan: (q: string) => 
                       <div style={chg(s.changePct < 0)}>{fmtStockPrice(s.dayLow, s.currency)}</div>
                     </div>
                   </div>
+                  <div className="mb-3">
+                    <StockBuyLinks symbol={s.symbol} name={s.name} market={s.market} />
+                  </div>
                   <button
                     onClick={() => onAskKhan(`Full trading analysis of ${s.name} (${s.symbol}): technical picture, key levels, fundamentals, bull vs bear case and a verdict with confidence.`)}
                     className="khan-btn-cyan w-full py-2.5 text-sm"
@@ -277,7 +281,7 @@ export default function StockSection({ onAskKhan }: { onAskKhan: (q: string) => 
                 </div>
               )}
               <button onClick={() => setExpanded(open ? null : s.symbol)} className="font-mono-khan flex items-center gap-1 text-[12px] text-[var(--khan-muted)] hover:text-[var(--khan-cyan)]">
-                {open ? 'Hide' : 'Why it matters'} <ArrowUpRight size={13} className={open ? 'rotate-90' : ''} />
+                {open ? 'Hide' : 'Buy / details ↓'} <ArrowUpRight size={13} className={open ? 'rotate-90' : ''} />
               </button>
             </article>
           );
