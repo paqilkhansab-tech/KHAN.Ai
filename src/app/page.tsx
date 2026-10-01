@@ -2,6 +2,7 @@
 
 import { useState } from 'react';
 import dynamic from 'next/dynamic';
+import Image from 'next/image';
 import { toast } from 'sonner';
 import { AuthProvider, useAuth } from '@/components/khan/AuthProvider';
 import Ticker from '@/components/khan/Ticker';
@@ -53,7 +54,7 @@ function Site() {
       {/* NAV */}
       <nav className="sticky top-0 z-50 flex items-center justify-between border-b border-[var(--khan-line)] bg-[rgba(10,15,28,0.82)] px-5 py-3 backdrop-blur-md md:px-6" style={{ paddingTop: 'max(12px, env(safe-area-inset-top))' }}>
         <a href="#top" className="font-display-khan flex items-center gap-2.5 text-[20px] font-semibold">
-          <span className="flex h-8 w-8 items-center justify-center rounded-lg text-[15px] font-bold" style={{ background: 'linear-gradient(135deg,#C9A24B,#3FE0D0)', color: '#0A0F1C' }}>K</span>
+          <Image src="/logo.png" alt="KHAN AI logo" width={32} height={32} className="rounded-lg" priority />
           KHAN
           <span className="khan-live-dot ml-0.5" />
         </a>
@@ -152,7 +153,7 @@ function Site() {
         <div className="mx-auto grid w-full max-w-[1180px] gap-8 px-6 py-12 md:grid-cols-3">
           <div>
             <div className="font-display-khan mb-3 flex items-center gap-2 text-[18px] font-semibold">
-              <span className="flex h-7 w-7 items-center justify-center rounded-lg text-[13px] font-bold" style={{ background: 'linear-gradient(135deg,#C9A24B,#3FE0D0)', color: '#0A0F1C' }}>K</span>
+              <Image src="/logo.png" alt="KHAN AI logo" width={28} height={28} className="rounded-lg" />
               KHAN
             </div>
             <p className="max-w-[34ch] text-[13px] leading-relaxed text-[var(--khan-muted)]">

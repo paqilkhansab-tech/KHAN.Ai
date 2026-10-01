@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getCurrentUser } from '@/lib/auth';
 import { db } from '@/lib/db';
+import { sendSupportEmail, mailerConfigured } from '@/lib/mailer';
 
 export async function POST(req: NextRequest) {
   try {
@@ -21,8 +22,21 @@ export async function POST(req: NextRequest) {
         userId: user?.id || null,
       },
     });
+
+    // Deliver the ticket straight to the owner's inbox (paqilkhansab@gmail.com)
+    const emailed = await sendSupportEmail({
+      id: ticket.id,
+      name: ticket.name,
+      email: ticket.email,
+      subject: ticket.subject,
+      message: ticket.message,
+      memberEmail: user?.email || null,
+    });
+
     return NextResponse.json({
       ticketId: ticket.id,
+      emailed,
+      emailConfigured: mailerConfigured(),
       message: 'Message received! Our team replies within 24 hours — usually much faster.',
     });
   } catch (err) {

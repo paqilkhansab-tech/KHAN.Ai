@@ -1,7 +1,7 @@
 'use client';
 
 import { useEffect, useMemo, useState } from 'react';
-import { ArrowUpRight, Activity, Search, Star, X } from 'lucide-react';
+import { ArrowUpRight, Activity, Search, Star, X, ShoppingBag } from 'lucide-react';
 import { toast } from 'sonner';
 import { useAuth } from './AuthProvider';
 import { useStockFeed, fmtStockPrice, ChangeTag } from './Ticker';
@@ -220,6 +220,12 @@ export default function StockSection({ onAskKhan }: { onAskKhan: (q: string) => 
         {filtered.map(s => {
           const open = expanded === s.symbol;
           const watched = watchlist.some(w => w.symbol === s.symbol);
+          // Direct buy deep link — same one-tap experience as the BTC spotlight
+          const buyUrl =
+            s.market === 'IN'
+              ? `https://groww.in/search?q=${encodeURIComponent(s.name)}`
+              : `https://robinhood.com/stocks/${s.symbol}`;
+          const buyLabel = s.market === 'IN' ? `Buy ${s.symbol} on Groww` : `Buy ${s.symbol} on Robinhood`;
           return (
             <article key={s.symbol} className="khan-card p-5 transition-colors hover:border-[#33436a]">
               <div className="mb-2 flex items-start justify-between gap-2">
@@ -280,9 +286,20 @@ export default function StockSection({ onAskKhan }: { onAskKhan: (q: string) => 
                   </button>
                 </div>
               )}
-              <button onClick={() => setExpanded(open ? null : s.symbol)} className="font-mono-khan flex items-center gap-1 text-[12px] text-[var(--khan-muted)] hover:text-[var(--khan-cyan)]">
-                {open ? 'Hide' : 'Buy / details ↓'} <ArrowUpRight size={13} className={open ? 'rotate-90' : ''} />
-              </button>
+              <div className="flex items-center gap-2">
+                <a
+                  href={buyUrl}
+                  target="_blank"
+                  rel="noopener noreferrer nofollow"
+                  className="khan-btn-gold flex flex-1 items-center justify-center gap-1.5 py-2 text-[13px]"
+                  title={`Opens ${buyLabel} in a new tab`}
+                >
+                  <ShoppingBag size={13} /> {buyLabel} ↗
+                </a>
+                <button onClick={() => setExpanded(open ? null : s.symbol)} className="font-mono-khan flex shrink-0 items-center gap-1 text-[12px] text-[var(--khan-muted)] hover:text-[var(--khan-cyan)]">
+                  {open ? 'Hide' : 'Details ↓'} <ArrowUpRight size={13} className={open ? 'rotate-90' : ''} />
+                </button>
+              </div>
             </article>
           );
         })}
