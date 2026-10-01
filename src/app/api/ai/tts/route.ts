@@ -1,0 +1,150 @@
+import { NextRequest, NextResponse } from 'next/server';
+import ZAI from 'z-ai-web-dev-sdk';
+
+/**
+ * KHAN AI VOICE ENGINE
+ * Converts KHAN's markdown analysis into natural spoken audio (mp3).
+ * - Strips markdown / emojis / symbols that TTS reads poorly
+ * - Converts currency symbols to spoken words ($64,000 -> "64,000 dollars")
+ * - Splits long answers at sentence boundaries (API limit: 1024 chars/request)
+ * - Concatenates chunk MP3s into one seamless audio response
+ */
+
+const VOICE = 'jam'; // British gentleman — premium KHAN persona
+const SPEED = 1.0;
+const MAX_INPUT_CHARS = 6000; // safety cap (~6 chunks)
+const CHUNK_SIZE = 950;
+
+/** Convert markdown answer into clean, natural speech text */
+function cleanForSpeech(md: string): string {
+  let t = md;
+  t = t.replace(/```[\s\S]*?```/g, ' code block omitted. '); // code fences
+  t = t.replace(/`([^`]+)`/g, '$1'); // inline code
+  t = t.replace(/!\[[^\]]*\]\([^)]*\)/g, ''); // images
+  t = t.replace(/\[([^\]]+)\]\([^)]*\)/g, '$1'); // links -> text
+  t = t.replace(/^\s{0,3}#{1,6}\s+/gm, ''); // heading marks
+  t = t.replace(/\*\*([^*]+)\*\*/g, '$1'); // bold
+  t = t.replace(/\*([^*]+)\*/g, '$1'); // italic
+  t = t.replace(/^\s{0,3}[-*+]\s+/gm, ''); // list bullets
+  t = t.replace(/^\s{0,3}>\s?/gm, ''); // blockquotes
+  t = t.replace(/\|/g, ' '); // table pipes
+  // currency: "$64,000" -> "64,000 dollars", "₹1,520" -> "1,520 rupees"
+  t = t.replace(/\$\s?([0-9][0-9,]*(?:\.[0-9]+)?)/g, '$1 dollars');
+  t = t.replace(/₹\s?([0-9][0-9,]*(?:\.[0-9]+)?)/g, '$1 rupees');
+  t = t.replace(/\$\s?/g, ' dollars ');
+  t = t.replace(/₹\s?/g, ' rupees ');
+  t = t.replace(/→|=>/g, ' to ');
+  t = t.replace(/([\u{1F300}-\u{1FAFF}]|[\u{2600}-\u{27BF}]|[\u{FE00}-\u{FE0F}]|[\u{2190}-\u{21FF}]|[\u{2B00}-\u{2BFF}])/gu, ' '); // emoji/arrows/symbols
+  t = t.replace(/\s*([.!?])\s*/g, '$1 '); // normalize sentence spacing
+  t = t.replace(/\s+/g, ' ').trim();
+  return t;
+}
+
+/** Split speech text into <=CHUNK_SIZE sentence-boundary chunks */
+function splitChunks(text: string, maxLen = CHUNK_SIZE): string[] {
+  if (text.length <= maxLen) return [text];
+  const sentences = text.match(/[^.!?]+[.!?]+["')\]]?\s*/g) || [text];
+  const chunks: string[] = [];
+  let cur = '';
+  for (const s of sentences) {
+    if ((cur + s).length <= maxLen) {
+      cur += s;
+    } else {
+      if (cur.trim()) chunks.push(cur.trim());
+      if (s.length > maxLen) {
+        chunks.push(s.trim()); // overlong single sentence: let API soft-split it
+        cur = '';
+      } else {
+        cur = s;
+      }
+    }
+  }
+  if (cur.trim()) chunks.push(cur.trim());
+  return chunks.slice(0, 8); // hard cap 8 chunks
+}
+
+/** Extract PCM payload + format info from a WAV buffer (walks RIFF chunks) */
+function extractWav(buf: Buffer): { sampleRate: number; channels: number; bits: number; pcm: Buffer } {
+  let offset = 12; // skip RIFF header + 'WAVE'
+  let pcm = buf.subarray(44); // fallback: assume standard 44-byte header
+  while (offset + 8 <= buf.length) {
+    const id = buf.toString('ascii', offset, offset + 4);
+    const size = buf.readUInt32LE(offset + 4);
+    if (id === 'data') {
+      pcm = buf.subarray(offset + 8, Math.min(offset + 8 + size, buf.length));
+      break;
+    }
+    offset += 8 + size + (size % 2); // chunks are word-aligned
+  }
+  return { sampleRate: buf.readUInt32LE(24), channels: buf.readUInt16LE(22), bits: buf.readUInt16LE(34), pcm };
+}
+
+/** Merge multiple same-format WAV buffers into one clean WAV (with 140ms pause between) */
+function mergeWav(buffers: Buffer[]): Buffer {
+  const parts = buffers.map(extractWav);
+  const first = parts[0];
+  const silence = Buffer.alloc(Math.ceil(first.sampleRate * first.channels * (first.bits / 8) * 0.14));
+  const pcmParts: Buffer[] = [];
+  parts.forEach((p, i) => {
+    if (i > 0) pcmParts.push(silence);
+    pcmParts.push(p.pcm);
+  });
+  const totalPcm = Buffer.concat(pcmParts);
+  const header = Buffer.alloc(44);
+  header.write('RIFF', 0);
+  header.writeUInt32LE(36 + totalPcm.length, 4);
+  header.write('WAVE', 8);
+  header.write('fmt ', 12);
+  header.writeUInt32LE(16, 16);
+  header.writeUInt16LE(1, 20); // PCM
+  header.writeUInt16LE(first.channels, 22);
+  header.writeUInt32LE(first.sampleRate, 24);
+  header.writeUInt32LE((first.sampleRate * first.channels * first.bits) / 8, 28);
+  header.writeUInt16LE((first.channels * first.bits) / 8, 32);
+  header.writeUInt16LE(first.bits, 34);
+  header.write('data', 36);
+  header.writeUInt32LE(totalPcm.length, 40);
+  return Buffer.concat([header, totalPcm]);
+}
+
+export async function POST(req: NextRequest) {
+  try {
+    const body = await req.json().catch(() => ({}));
+    const raw: string = typeof body.text === 'string' ? body.text : '';
+    if (!raw.trim()) {
+      return NextResponse.json({ error: 'Nothing to speak.' }, { status: 400 });
+    }
+    const speech = cleanForSpeech(raw.slice(0, MAX_INPUT_CHARS));
+    if (!speech) {
+      return NextResponse.json({ error: 'Nothing speakable found.' }, { status: 400 });
+    }
+    const chunks = splitChunks(speech);
+
+    const zai = await ZAI.create();
+    const buffers: Buffer[] = [];
+    for (const chunk of chunks) {
+      const response = await zai.audio.tts.create({
+        input: chunk,
+        voice: VOICE,
+        speed: SPEED,
+        response_format: 'wav',
+        stream: false,
+      });
+      const arrayBuffer = await response.arrayBuffer();
+      buffers.push(Buffer.from(new Uint8Array(arrayBuffer)));
+    }
+
+    const audio = buffers.length === 1 ? buffers[0] : mergeWav(buffers);
+    return new NextResponse(new Uint8Array(audio), {
+      status: 200,
+      headers: {
+        'Content-Type': 'audio/wav',
+        'Content-Length': String(audio.length),
+        'Cache-Control': 'no-store',
+      },
+    });
+  } catch (err) {
+    console.error('KHAN TTS error:', err);
+    return NextResponse.json({ error: 'Voice engine unavailable — try again.' }, { status: 500 });
+  }
+}

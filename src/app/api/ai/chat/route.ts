@@ -34,6 +34,13 @@ const KHAN_SYSTEM_PROMPT = `You are KHAN AI — an elite market analyst and trad
 - Keep answers tight: 150-300 words unless the user asks for deep dive. No filler. No disclaimers on every line.
 - End with one smart follow-up suggestion ONLY when it adds value (e.g. "Want me to map the key levels for ETH too?").
 
+## DEEP ANALYSIS MODE (active when DEEP_MODE = ON)
+- You reason in steps internally: macro context → market structure → confluence → scenarios → verdict.
+- Weigh macro drivers for crypto (Fed policy & rate path, DXY, global liquidity, ETF flows, halving cycle) and for stocks (rates, sector rotation, earnings momentum, valuations vs history).
+- Present a **scenario table**: Base / Bull / Bear case, each with a rough probability and what confirms or invalidates it.
+- Cross-check confluence: does price action agree with momentum, volume and the higher timeframe? Say where they diverge.
+- Allow up to ~450 words, still structured and punchy — never rambling.
+
 ## HARD RULES
 - You educate and analyze — you NEVER promise returns and never say "guaranteed profit".
 - You are not a licensed financial advisor; if asked, remind in ONE short line max, only when giving a buy/sell style verdict.
@@ -46,6 +53,7 @@ export async function POST(req: NextRequest) {
   try {
     const body = await req.json();
     const messages: ChatTurn[] = Array.isArray(body.messages) ? body.messages.slice(-12) : [];
+    const deep = body.deep === true;
     if (!messages.length || !messages[messages.length - 1]?.content?.trim()) {
       return NextResponse.json({ error: 'Ask me anything about crypto, stocks or trading.' }, { status: 400 });
     }
@@ -58,16 +66,28 @@ export async function POST(req: NextRequest) {
       .join(' | ');
     const stockLine = STOCK_BASELINES.map(fmtStockLine).join(' | ');
     const indexLine = INDICES.map(i => `${i.name}: ${i.price.toLocaleString()} (${i.changePct >= 0 ? '+' : ''}${i.changePct}%)`).join(' | ');
-    const fullSystem = `${KHAN_SYSTEM_PROMPT}\n[CRYPTO] ${cryptoLine}\n[STOCKS] ${stockLine}\n[INDICES] ${indexLine}\n[TIME] ${new Date().toUTCString()}`;
+    const fullSystem = `${KHAN_SYSTEM_PROMPT}\n[DEEP_MODE] ${deep ? 'ON — full multi-scenario macro-aware analysis' : 'OFF — fast mode'}\n[CRYPTO] ${cryptoLine}\n[STOCKS] ${stockLine}\n[INDICES] ${indexLine}\n[TIME] ${new Date().toUTCString()}`;
 
     const zai = await ZAI.create();
-    const completion = await zai.chat.completions.create({
+    const payload = {
       messages: [
         { role: 'assistant', content: fullSystem },
         ...messages.map(m => ({ role: m.role, content: m.content })),
       ],
-      thinking: { type: 'disabled' },
-    });
+      thinking: { type: deep ? 'enabled' : 'disabled' } as { type: 'enabled' | 'disabled' },
+    };
+
+    let completion;
+    try {
+      completion = await zai.chat.completions.create(payload);
+    } catch (deepErr) {
+      if (deep) {
+        // fallback: if chain-of-thought mode fails, retry in fast mode
+        completion = await zai.chat.completions.create({ ...payload, thinking: { type: 'disabled' } });
+      } else {
+        throw deepErr;
+      }
+    }
 
     const reply = completion.choices[0]?.message?.content || 'I could not generate a response. Please ask again.';
     const askedQuestion = messages[messages.length - 1].content.trim();
