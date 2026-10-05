@@ -2,9 +2,22 @@ import { SignJWT, jwtVerify } from 'jose';
 import { cookies } from 'next/headers';
 import { db } from '@/lib/db';
 
-const SECRET = new TextEncoder().encode(
-  process.env.AUTH_SECRET || 'khan-ai-market-companion-secret-key-2026-launch-world'
-);
+/**
+ * KHAN session secret — MUST come from environment.
+ * Production refuses to boot without it; development falls back to a
+ * locally-generated random secret so sessions survive `next dev` restarts.
+ */
+function loadSecret(): Uint8Array {
+  const secret = process.env.AUTH_SECRET;
+  if (secret && secret.length >= 32) return new TextEncoder().encode(secret);
+  if (process.env.NODE_ENV === 'production') {
+    throw new Error('AUTH_SECRET missing or too short — set a 64+ char random value in .env');
+  }
+  // dev-only fallback (never used in production builds)
+  return new TextEncoder().encode('khan-dev-only-secret-do-not-use-in-production-0123456789');
+}
+
+const SECRET = loadSecret();
 const COOKIE_NAME = 'khan_session';
 const MAX_AGE = 60 * 60 * 24 * 30; // 30 days
 

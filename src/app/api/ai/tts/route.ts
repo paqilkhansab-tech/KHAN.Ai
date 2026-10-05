@@ -1,5 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import ZAI from 'z-ai-web-dev-sdk';
+import { ttsSchema, parse } from '@/lib/validation';
+import { rateLimit, clientIp, tooMany } from '@/lib/rate-limit';
 
 /**
  * KHAN AI VOICE ENGINE
@@ -108,13 +110,15 @@ function mergeWav(buffers: Buffer[]): Buffer {
 }
 
 export async function POST(req: NextRequest) {
+  // voice generation is expensive: 15 requests / 5 min / IP
+  const rl = rateLimit(`tts:${clientIp(req)}`, 15, 5 * 60_000);
+  if (!rl.ok) return tooMany(rl.retryAfter, 'Voice quota reached — try again in a few minutes.');
+
   try {
     const body = await req.json().catch(() => ({}));
-    const raw: string = typeof body.text === 'string' ? body.text : '';
-    if (!raw.trim()) {
-      return NextResponse.json({ error: 'Nothing to speak.' }, { status: 400 });
-    }
-    const speech = cleanForSpeech(raw.slice(0, MAX_INPUT_CHARS));
+    const parsed = parse(ttsSchema, body);
+    if (!parsed.ok) return NextResponse.json({ error: parsed.error }, { status: 400 });
+    const speech = cleanForSpeech(parsed.data.text);
     if (!speech) {
       return NextResponse.json({ error: 'Nothing speakable found.' }, { status: 400 });
     }

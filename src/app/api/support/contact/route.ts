@@ -2,23 +2,26 @@ import { NextRequest, NextResponse } from 'next/server';
 import { getCurrentUser } from '@/lib/auth';
 import { db } from '@/lib/db';
 import { sendSupportEmail, mailerConfigured } from '@/lib/mailer';
+import { supportSchema, parse } from '@/lib/validation';
+import { rateLimit, clientIp, tooMany } from '@/lib/rate-limit';
 
 export async function POST(req: NextRequest) {
+  // spam protection: 5 tickets / 10 min / IP
+  const rl = rateLimit(`support:${clientIp(req)}`, 5, 10 * 60_000);
+  if (!rl.ok) return tooMany(rl.retryAfter, 'Too many messages sent. Please wait a few minutes.');
+
   try {
-    const { name, email, subject, message } = await req.json();
-    if (!name?.trim() || !email?.trim() || !message?.trim()) {
-      return NextResponse.json({ error: 'Please fill your name, email and message.' }, { status: 400 });
-    }
-    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
-      return NextResponse.json({ error: 'That email address does not look valid.' }, { status: 400 });
-    }
+    const parsed = parse(supportSchema, await req.json());
+    if (!parsed.ok) return NextResponse.json({ error: parsed.error }, { status: 400 });
+    const { name, email, subject, message } = parsed.data;
+
     const user = await getCurrentUser();
     const ticket = await db.supportTicket.create({
       data: {
-        name: name.trim(),
-        email: email.trim(),
-        subject: subject?.trim() || 'General question',
-        message: message.trim(),
+        name,
+        email,
+        subject: subject || 'General question',
+        message,
         userId: user?.id || null,
       },
     });

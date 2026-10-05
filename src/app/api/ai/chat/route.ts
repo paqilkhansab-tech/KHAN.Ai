@@ -3,14 +3,12 @@ import ZAI from 'z-ai-web-dev-sdk';
 import { getCurrentUser } from '@/lib/auth';
 import { db } from '@/lib/db';
 import { CRYPTO_BASELINES, STOCK_BASELINES, INDICES } from '@/lib/market-data';
+import { chatSchema, parse } from '@/lib/validation';
+import { rateLimit, clientIp, tooMany } from '@/lib/rate-limit';
 
 const fmtStockLine = (s: typeof STOCK_BASELINES[number]) =>
   `${s.symbol} (${s.market === 'IN' ? 'India' : 'US'}): ${s.currency === 'INR' ? '₹' : '$'}${s.price.toLocaleString('en-IN')} (${s.changePct >= 0 ? '+' : ''}${s.changePct}%)`;
 
-interface ChatTurn {
-  role: 'user' | 'assistant';
-  content: string;
-}
 
 const KHAN_SYSTEM_PROMPT = `You are KHAN AI — an elite market analyst and trading companion, built into the KHAN platform (khanai.world). You are extremely powerful, confident and precise.
 
@@ -50,10 +48,16 @@ const KHAN_SYSTEM_PROMPT = `You are KHAN AI — an elite market analyst and trad
 ## LIVE MARKET DATA (source of truth, updated feed)`;
 
 export async function POST(req: NextRequest) {
+  // AI cost protection: 20 questions / 5 min / IP
+  const rl = rateLimit(`aichat:${clientIp(req)}`, 20, 5 * 60_000);
+  if (!rl.ok) return tooMany(rl.retryAfter, 'KHAN needs a breather — you have used your AI quota for now. Try again in a few minutes.');
+
   try {
     const body = await req.json();
-    const messages: ChatTurn[] = Array.isArray(body.messages) ? body.messages.slice(-12) : [];
-    const deep = body.deep === true;
+    const parsed = parse(chatSchema, body);
+    if (!parsed.ok) return NextResponse.json({ error: parsed.error }, { status: 400 });
+    const messages = parsed.data.messages;
+    const deep = parsed.data.deep;
     if (!messages.length || !messages[messages.length - 1]?.content?.trim()) {
       return NextResponse.json({ error: 'Ask me anything about crypto, stocks or trading.' }, { status: 400 });
     }
@@ -71,8 +75,8 @@ export async function POST(req: NextRequest) {
     const zai = await ZAI.create();
     const payload = {
       messages: [
-        { role: 'assistant', content: fullSystem },
-        ...messages.map(m => ({ role: m.role, content: m.content })),
+        { role: 'assistant' as const, content: fullSystem },
+        ...messages.map(m => ({ role: m.role as 'user' | 'assistant', content: m.content })),
       ],
       thinking: { type: deep ? 'enabled' : 'disabled' } as { type: 'enabled' | 'disabled' },
     };

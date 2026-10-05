@@ -1,6 +1,6 @@
 import type { Metadata, Viewport } from "next";
+import { Toaster } from "sonner";
 import "./globals.css";
-import { Toaster } from "@/components/ui/toaster";
 
 export const metadata: Metadata = {
   title: "KHAN — AI Market Companion | Crypto, Stocks & Trading Intelligence",
@@ -35,7 +35,7 @@ export default function RootLayout({
     <html lang="en" suppressHydrationWarning>
       <body className="antialiased bg-background text-foreground">
         {children}
-        <Toaster />
+        <Toaster theme="dark" position="bottom-right" richColors closeButton />
       </body>
     </html>
   );

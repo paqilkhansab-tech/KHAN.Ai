@@ -10,7 +10,7 @@ export interface StockQuote extends StockAsset {
 
 export interface StockResponse {
   stocks: StockQuote[];
-  indices: (typeof INDICES)[number] & { spark: number[] }[];
+  indices: ((typeof INDICES)[number] & { spark: number[] })[];
   source: 'simulated';
   note: string;
   sessions: { us: 'open' | 'closed'; india: 'open' | 'closed'; utc: string };

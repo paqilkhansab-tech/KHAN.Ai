@@ -268,11 +268,11 @@ export default function StockSection({ onAskKhan }: { onAskKhan: (q: string) => 
                     </div>
                     <div className="khan-card-2 rounded-lg p-2">
                       <div className="text-[9.5px] text-[var(--khan-muted)]">DAY HIGH</div>
-                      <div style={chg(s.changePct >= 0)}>{fmtStockPrice(s.dayHigh, s.currency)}</div>
+                      <div style={chg(s.changePct)}>{fmtStockPrice(s.dayHigh, s.currency)}</div>
                     </div>
                     <div className="khan-card-2 rounded-lg p-2">
                       <div className="text-[9.5px] text-[var(--khan-muted)]">DAY LOW</div>
-                      <div style={chg(s.changePct < 0)}>{fmtStockPrice(s.dayLow, s.currency)}</div>
+                      <div style={chg(s.changePct)}>{fmtStockPrice(s.dayLow, s.currency)}</div>
                     </div>
                   </div>
                   <div className="mb-3">

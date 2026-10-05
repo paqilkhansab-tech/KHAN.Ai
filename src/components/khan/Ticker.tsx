@@ -150,10 +150,10 @@ export default function Ticker() {
 
   type Chip =
     | { kind: 'crypto'; id: string; symbol: string; name: string; price: number; change: number }
-    | { kind: 'stock'; id: string; symbol: string; name: string; price: number; change: number; currency: 'USD' | 'INR' };
+    | { kind: 'stock'; id: string; symbol: string; name: string; price: number; change: number; currency: 'USD' | 'INR'; market: 'US' | 'IN' };
   const all: Chip[] = [
     ...assets.map(a => ({ kind: 'crypto' as const, id: a.id, symbol: a.symbol, name: a.name, price: a.price, change: a.change24h })),
-    ...stocks.map(s => ({ kind: 'stock' as const, id: s.symbol, symbol: s.symbol, name: s.name, price: s.price, change: s.changePct, currency: s.currency })),
+    ...stocks.map(s => ({ kind: 'stock' as const, id: s.symbol, symbol: s.symbol, name: s.name, price: s.price, change: s.changePct, currency: s.currency, market: s.market })),
   ];
   const chips = [...all, ...all]; // duplicate for seamless loop
 

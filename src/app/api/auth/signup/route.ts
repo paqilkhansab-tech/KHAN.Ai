@@ -2,26 +2,21 @@ import { NextRequest, NextResponse } from 'next/server';
 import bcrypt from 'bcryptjs';
 import { db } from '@/lib/db';
 import { createSession } from '@/lib/auth';
+import { signupSchema, parse } from '@/lib/validation';
+import { rateLimit, clientIp, tooMany } from '@/lib/rate-limit';
 
 export async function POST(req: NextRequest) {
+  // abuse protection: 8 signups / hour / IP
+  const rl = rateLimit(`signup:${clientIp(req)}`, 8, 60 * 60_000);
+  if (!rl.ok) return tooMany(rl.retryAfter, 'Too many accounts created from this network. Try again later.');
+
   try {
-    const { name, email, password, phone } = await req.json();
-
-    // Validation
-    if (!name || typeof name !== 'string' || name.trim().length < 2) {
-      return NextResponse.json({ error: 'Please enter your full name (min 2 characters).' }, { status: 400 });
-    }
-    if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
-      return NextResponse.json({ error: 'Please enter a valid email address.' }, { status: 400 });
-    }
-    if (!password || password.length < 6) {
-      return NextResponse.json({ error: 'Password must be at least 6 characters.' }, { status: 400 });
-    }
-
-    const normalizedEmail = email.trim().toLowerCase();
+    const parsed = parse(signupSchema, await req.json());
+    if (!parsed.ok) return NextResponse.json({ error: parsed.error }, { status: 400 });
+    const { name, email, password, phone } = parsed.data;
 
     // Check if user already exists
-    const existing = await db.user.findUnique({ where: { email: normalizedEmail } });
+    const existing = await db.user.findUnique({ where: { email } });
     if (existing) {
       return NextResponse.json({ error: 'An account with this email already exists. Please sign in.' }, { status: 409 });
     }
@@ -30,9 +25,9 @@ export async function POST(req: NextRequest) {
     const passwordHash = await bcrypt.hash(password, 12);
     const user = await db.user.create({
       data: {
-        name: name.trim(),
-        email: normalizedEmail,
-        phone: phone?.trim() || null,
+        name,
+        email,
+        phone: phone || null,
         passwordHash,
         lastLoginAt: new Date(),
       },
