@@ -139,6 +139,10 @@
   background: var(--khan-bg);
   color: var(--khan-text);
   font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  /* Decorative glows (hero, header) intentionally bleed past their boxes.
+     `clip` (not `hidden`) removes the horizontal page drag on small screens
+     WITHOUT creating a scroll container, so the sticky header keeps working. */
+  overflow-x: clip;
 }
 
 .font-display-khan {
