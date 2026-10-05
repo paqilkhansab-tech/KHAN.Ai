@@ -18,6 +18,7 @@ model User {
   lastLoginAt    DateTime?
   watchlist      WatchlistItem[]
   chatMessages   ChatMessage[]
+  resetOTPs      PasswordResetOTP[]
 }
 
 model WatchlistItem {
@@ -50,4 +51,18 @@ model SupportTicket {
   message   String
   status    String   @default("open") // open | resolved
   createdAt DateTime @default(now())
+}
+
+model PasswordResetOTP {
+  id        String   @id @default(cuid())
+  userId    String
+  email     String
+  otpHash   String   // bcrypt hash of the 6-digit code — never stored raw
+  attempts  Int      @default(0) // invalidation after 5 wrong entries
+  used      Boolean  @default(false)
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, used])
 }

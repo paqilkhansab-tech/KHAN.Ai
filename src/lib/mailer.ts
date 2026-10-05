@@ -45,6 +45,46 @@ export function mailerConfigured(): boolean {
 }
 
 /**
+ * KHAN OTP DELIVERY — password-reset one-time code.
+ * Requires real SMTP (GMAIL_USER + GMAIL_APP_PASSWORD): the code must reach
+ * the CUSTOMER's inbox, which a relay-to-owner service cannot do.
+ * Returns false when SMTP is not configured or the send fails.
+ */
+export async function sendOTPEmail(to: string, name: string, code: string): Promise<boolean> {
+  const transporter = getTransporter();
+  if (!transporter) {
+    console.warn('[mailer] cannot send OTP — GMAIL_USER / GMAIL_APP_PASSWORD not set.');
+    return false;
+  }
+  const html = `
+  <div style="font-family:Segoe UI,Arial,sans-serif;background:#0A0F1C;padding:32px;border-radius:16px;color:#e8ecf4;max-width:520px">
+    <h2 style="color:#C9A24B;margin:0 0 4px">KHAN Password Reset</h2>
+    <p style="color:#8b93a7;margin:0 0 20px;font-size:14px">Hi ${esc(name)}, use this one-time code to set a new password:</p>
+    <div style="text-align:center;margin:0 0 20px">
+      <span style="display:inline-block;letter-spacing:12px;font-size:34px;font-weight:800;color:#3FE0D0;background:#121828;border:1px solid #C9A24B;border-radius:12px;padding:16px 26px 16px 38px">${esc(code)}</span>
+    </div>
+    <p style="color:#8b93a7;margin:0 0 6px;font-size:13px">This code expires in <b style="color:#e8ecf4">10 minutes</b> and can be used once.</p>
+    <p style="color:#8b93a7;margin:0;font-size:13px">Didn't request it? Ignore this email — your account stays safe.</p>
+    <p style="margin-top:22px;font-size:11px;color:#5d6578">Sent by the KHAN AI security system. Never share this code with anyone.</p>
+  </div>`;
+  const text = `KHAN Password Reset\n\nHi ${name},\n\nYour one-time reset code: ${code}\n\nExpires in 10 minutes. Use it once. Didn't request it? Ignore this email.`;
+
+  try {
+    await transporter.sendMail({
+      from: `KHAN Security <${process.env.GMAIL_USER}>`,
+      to,
+      subject: `KHAN password reset code: ${code}`,
+      text,
+      html,
+    });
+    return true;
+  } catch (err) {
+    console.error('[mailer] OTP send failed:', err);
+    return false;
+  }
+}
+
+/**
  * ZERO-CONFIG FALLBACK — FormSubmit relay.
  * Forwards the ticket to the owner's Gmail via formsubmit.co's AJAX endpoint.
  * Requires no credentials. The VERY FIRST submission triggers a one-time

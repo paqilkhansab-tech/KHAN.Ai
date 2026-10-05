@@ -164,7 +164,6 @@ export default function KhanChat({
       askedRef.current = true;
       ask(pendingQuestion).finally(() => onPendingConsumed?.());
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [pendingQuestion]);
 
   const pill = (active: boolean) =>

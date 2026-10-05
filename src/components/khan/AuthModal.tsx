@@ -81,7 +81,9 @@ export default function AuthModal({
   initialMode?: 'signin' | 'signup';
 }) {
   const { refresh } = useAuth();
-  const [mode, setMode] = useState<'signin' | 'signup'>(initialMode);
+  const [mode, setMode] = useState<'signin' | 'signup' | 'forgot'>(initialMode);
+  const [forgotStep, setForgotStep] = useState<1 | 2>(1);
+  const [otp, setOtp] = useState('');
   const [form, setForm] = useState({ name: '', email: '', phone: '', password: '' });
   const [showPw, setShowPw] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -94,6 +96,8 @@ export default function AuthModal({
   useEffect(() => {
     if (open) {
       setMode(initialMode);
+      setForgotStep(1);
+      setOtp('');
       setError('');
       setShowPw(false);
       const t = setTimeout(() => emailRef.current?.focus(), 420);
@@ -124,9 +128,10 @@ export default function AuthModal({
 
   if (!open) return null;
 
-  const switchMode = (m: 'signin' | 'signup') => {
+  const switchMode = (m: 'signin' | 'signup' | 'forgot') => {
     setMode(m);
     setError('');
+    if (m === 'forgot') setForgotStep(1);
   };
 
   const submit = async (e: React.FormEvent) => {
@@ -134,6 +139,45 @@ export default function AuthModal({
     setError('');
     setBusy(true);
     try {
+      if (mode === 'forgot') {
+        if (forgotStep === 1) {
+          // STEP 1 — request the OTP email
+          const res = await fetch('/api/auth/forgot-password', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ email: form.email }),
+          });
+          const data = await res.json();
+          if (!res.ok) {
+            setError(data.error || 'Could not send the code. Try again.');
+            setErrKey(k => k + 1);
+            return;
+          }
+          toast.success(data.message || 'Reset code sent — check your inbox.');
+          setForgotStep(2);
+          setError('');
+          return;
+        }
+        // STEP 2 — verify OTP + set new password
+        const res = await fetch('/api/auth/reset-password', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ email: form.email, otp, password: form.password }),
+        });
+        const data = await res.json();
+        if (!res.ok) {
+          setError(data.error || 'Invalid or expired code.');
+          setErrKey(k => k + 1);
+          return;
+        }
+        toast.success(data.message || 'Password updated — sign in with your new password.');
+        setMode('signin');
+        setForgotStep(1);
+        setOtp('');
+        setForm(f => ({ ...f, password: '' }));
+        return;
+      }
+
       const endpoint = mode === 'signup' ? '/api/auth/signup' : '/api/auth/signin';
       const payload = mode === 'signup' ? form : { email: form.email, password: form.password };
       const res = await fetch(endpoint, {
@@ -171,7 +215,7 @@ export default function AuthModal({
       }}
       role="dialog"
       aria-modal="true"
-      aria-label={mode === 'signup' ? 'Create your KHAN account' : 'Sign in to KHAN'}
+      aria-label={mode === 'signup' ? 'Create your KHAN account' : mode === 'forgot' ? 'Reset your KHAN password' : 'Sign in to KHAN'}
     >
       {/* 3D entrance card with mouse tilt */}
       <motion.div
@@ -200,12 +244,16 @@ export default function AuthModal({
 
         <div className="font-mono-khan mb-1.5 mt-2 text-center text-[11px] tracking-[2px] text-[var(--khan-cyan)]">KHAN SECURE ACCESS</div>
         <h3 className="font-display-khan mb-1 text-center text-[24px] font-semibold">
-          {mode === 'signup' ? 'Create your account' : 'Welcome back'}
+          {mode === 'signup' ? 'Create your account' : mode === 'forgot' ? 'Reset your password' : 'Welcome back'}
         </h3>
         <p className="mb-6 text-center text-[13px] text-[var(--khan-muted)]">
           {mode === 'signup'
             ? '20 seconds. Your data is stored on real KHAN servers — permanently, on any device.'
-            : 'Sign in to reach your watchlist, saved analyses and personal profile.'}
+            : mode === 'forgot'
+              ? forgotStep === 1
+                ? 'Enter your account email — we will send you a 6-digit reset code.'
+                : `Check ${form.email} for the 6-digit code, then choose a new password.`
+              : 'Sign in to reach your watchlist, saved analyses and personal profile.'}
         </p>
 
         {/* 3D flip on mode switch */}
@@ -246,6 +294,22 @@ export default function AuthModal({
                 </div>
               </>
             )}
+            {/* FORGOT — step 2: OTP + new password */}
+            {mode === 'forgot' && forgotStep === 2 && (
+              <div className="relative mb-3">
+                <ShieldCheck size={16} className="absolute left-3.5 top-1/2 -translate-y-1/2 text-[var(--khan-cyan)]" />
+                <input
+                  className="khan-input pl-10 tracking-[8px]"
+                  placeholder="6-digit code"
+                  inputMode="numeric"
+                  autoComplete="one-time-code"
+                  maxLength={6}
+                  value={otp}
+                  onChange={e => setOtp(e.target.value.replace(/\D/g, ''))}
+                  required
+                />
+              </div>
+            )}
             <div className="relative mb-3">
               <Mail size={16} className="absolute left-3.5 top-1/2 -translate-y-1/2 text-[var(--khan-muted)]" />
               <input
@@ -257,29 +321,55 @@ export default function AuthModal({
                 onChange={e => setForm(f => ({ ...f, email: e.target.value }))}
                 autoComplete="email"
                 required
+                disabled={mode === 'forgot' && forgotStep === 2}
               />
             </div>
-            <div className="relative mb-4">
-              <Lock size={16} className="absolute left-3.5 top-1/2 -translate-y-1/2 text-[var(--khan-muted)]" />
-              <input
-                className="khan-input px-10"
-                placeholder={mode === 'signup' ? 'Create password (min 6 chars)' : 'Password'}
-                type={showPw ? 'text' : 'password'}
-                value={form.password}
-                onChange={e => setForm(f => ({ ...f, password: e.target.value }))}
-                autoComplete={mode === 'signup' ? 'new-password' : 'current-password'}
-                required
-                minLength={6}
-              />
-              <button
-                type="button"
-                onClick={() => setShowPw(s => !s)}
-                aria-label={showPw ? 'Hide password' : 'Show password'}
-                className="absolute right-3.5 top-1/2 -translate-y-1/2 text-[var(--khan-muted)] hover:text-white"
-              >
-                {showPw ? <EyeOff size={16} /> : <Eye size={16} />}
-              </button>
-            </div>
+            {mode !== 'forgot' && (
+              <div className="relative mb-4">
+                <Lock size={16} className="absolute left-3.5 top-1/2 -translate-y-1/2 text-[var(--khan-muted)]" />
+                <input
+                  className="khan-input px-10"
+                  placeholder={mode === 'signup' ? 'Create password (min 6 chars)' : 'Password'}
+                  type={showPw ? 'text' : 'password'}
+                  value={form.password}
+                  onChange={e => setForm(f => ({ ...f, password: e.target.value }))}
+                  autoComplete={mode === 'signup' ? 'new-password' : 'current-password'}
+                  required
+                  minLength={6}
+                />
+                <button
+                  type="button"
+                  onClick={() => setShowPw(s => !s)}
+                  aria-label={showPw ? 'Hide password' : 'Show password'}
+                  className="absolute right-3.5 top-1/2 -translate-y-1/2 text-[var(--khan-muted)] hover:text-white"
+                >
+                  {showPw ? <EyeOff size={16} /> : <Eye size={16} />}
+                </button>
+              </div>
+            )}
+            {mode === 'forgot' && forgotStep === 2 && (
+              <div className="relative mb-4">
+                <Lock size={16} className="absolute left-3.5 top-1/2 -translate-y-1/2 text-[var(--khan-muted)]" />
+                <input
+                  className="khan-input px-10"
+                  placeholder="New password (min 6 chars)"
+                  type={showPw ? 'text' : 'password'}
+                  value={form.password}
+                  onChange={e => setForm(f => ({ ...f, password: e.target.value }))}
+                  autoComplete="new-password"
+                  required
+                  minLength={6}
+                />
+                <button
+                  type="button"
+                  onClick={() => setShowPw(s => !s)}
+                  aria-label={showPw ? 'Hide password' : 'Show password'}
+                  className="absolute right-3.5 top-1/2 -translate-y-1/2 text-[var(--khan-muted)] hover:text-white"
+                >
+                  {showPw ? <EyeOff size={16} /> : <Eye size={16} />}
+                </button>
+              </div>
+            )}
 
             {error && (
               <motion.div
@@ -310,10 +400,12 @@ export default function AuthModal({
                     animate={{ rotate: 360 }}
                     transition={{ duration: 0.7, ease: 'linear', repeat: Infinity }}
                   />
-                  Securing your session…
+                  {mode === 'forgot' && forgotStep === 1 ? 'Sending your code…' : 'Securing…'}
                 </span>
               ) : mode === 'signup' ? (
                 'Create account — it\u2019s free'
+              ) : mode === 'forgot' ? (
+                forgotStep === 1 ? 'Email me the reset code' : 'Set new password'
               ) : (
                 'Sign in securely'
               )}
@@ -322,11 +414,26 @@ export default function AuthModal({
         </AnimatePresence>
 
         <p className="mt-4 text-center text-[13px] text-[var(--khan-muted)]">
-          {mode === 'signup' ? 'Already a member?' : 'New to KHAN?'}{' '}
-          <button onClick={() => switchMode(mode === 'signup' ? 'signin' : 'signup')} className="font-semibold text-[var(--khan-cyan)] hover:underline">
-            {mode === 'signup' ? 'Sign in' : 'Create a free account'}
-          </button>
+          {mode === 'forgot' ? (
+            <button onClick={() => switchMode('signin')} className="font-semibold text-[var(--khan-cyan)] hover:underline">
+              ← Back to sign in
+            </button>
+          ) : (
+            <>
+              {mode === 'signup' ? 'Already a member?' : 'New to KHAN?'}{' '}
+              <button onClick={() => switchMode(mode === 'signup' ? 'signin' : 'signup')} className="font-semibold text-[var(--khan-cyan)] hover:underline">
+                {mode === 'signup' ? 'Sign in' : 'Create a free account'}
+              </button>
+            </>
+          )}
         </p>
+        {mode === 'signin' && (
+          <p className="mt-1.5 text-center text-[12.5px]">
+            <button onClick={() => switchMode('forgot')} className="text-[var(--khan-muted)] transition-colors hover:text-[var(--khan-gold)] hover:underline">
+              Forgot password?
+            </button>
+          </p>
+        )}
 
         <motion.div
           className="mt-5 grid grid-cols-3 gap-2 border-t border-[var(--khan-line)] pt-4"

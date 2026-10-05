@@ -82,6 +82,19 @@ export const chatSchema = z.object({
     .max(12),
 });
 
+export const forgotPasswordSchema = z.object({
+  email: emailBase,
+});
+
+export const resetPasswordSchema = z.object({
+  email: emailBase,
+  otp: z
+    .string()
+    .transform(v => v.replace(/\D/g, ''))
+    .refine(v => v.length === 6, 'Enter the 6-digit code from your email'),
+  password: passwordBase,
+});
+
 export const ttsSchema = z.object({
   text: z
     .string()
