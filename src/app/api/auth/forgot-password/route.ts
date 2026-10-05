@@ -15,9 +15,17 @@ import { rateLimit, clientIp, tooMany } from '@/lib/rate-limit';
  * - Always the same generic response — never reveals whether the email exists
  * - Rate limited: 3 requests / 15 min / IP  and  3 / 15 min / email account
  * - Any previous unused codes for the account are invalidated
- * - Requires SMTP configured (the code must reach the customer's inbox);
- *   returns 503 "email unavailable" otherwise — still no account disclosure
+ * - Requires an email channel (SMTP, or the owner-inbox relay for the owner's
+ *   own address); returns 503 otherwise — still no account disclosure
+ *
+ * PREVIEW TEST MODE: when OTP_DEV_ECHO=true AND the app is NOT running in
+ * production, the API returns the code in the response so the reset flow can
+ * be tested end-to-end on environments where outbound email is blocked
+ * (e.g. this sandbox preview). Production builds NEVER echo codes.
  */
+const devEcho =
+  process.env.OTP_DEV_ECHO === 'true' && process.env.NODE_ENV !== 'production';
+
 export async function POST(req: NextRequest) {
   const ipRl = rateLimit(`forgot:${clientIp(req)}`, 3, 15 * 60_000);
   if (!ipRl.ok) return tooMany(ipRl.retryAfter, 'Too many reset requests. Please wait a few minutes.');
@@ -31,8 +39,8 @@ export async function POST(req: NextRequest) {
       message: 'If that email has a KHAN account, a 6-digit reset code is on its way. Check your inbox and spam folder.',
     };
 
-    if (!mailerConfigured()) {
-      console.error('[forgot-password] SMTP not configured — cannot deliver OTP.');
+    if (!mailerConfigured() && !devEcho) {
+      console.error('[forgot-password] No email channel configured (set GMAIL_USER + GMAIL_APP_PASSWORD) — cannot deliver OTP.');
       return NextResponse.json(
         { error: 'Email service is temporarily unavailable. Please try again shortly or contact support.' },
         { status: 503 }
@@ -46,6 +54,13 @@ export async function POST(req: NextRequest) {
     if (!user) {
       // burn comparable bcrypt time to resist timing-based enumeration
       await bcrypt.compare('timing-equalizer', '$2b$12$kETvLQQCCFpLiLm7faTPC.6qrAkAXp9nlu2gW7.7qTDiLUSqrS0l6');
+      if (devEcho) {
+        // preview-only honesty: saves testers hours of confusion
+        return NextResponse.json({
+          message: GENERIC_OK.message,
+          devHint: `Preview mode: no KHAN account exists for ${email}. Create one first (Sign up), then test the reset flow again.`,
+        });
+      }
       return NextResponse.json(GENERIC_OK);
     }
 
@@ -70,15 +85,33 @@ export async function POST(req: NextRequest) {
     });
 
     const sent = await sendOTPEmail(email, user.name, code);
-    if (!sent) {
-      console.error('[forgot-password] OTP email send failed for a reset request.');
+    if (sent.delivered) {
+      return NextResponse.json(GENERIC_OK);
+    }
+
+    console.error(`[forgot-password] OTP delivery failed (${sent.reason || 'unknown reason'}).`);
+
+    // Owner-only, production-only: the relay needs its one-time activation click.
+    if (sent.pendingActivation && !devEcho) {
       return NextResponse.json(
-        { error: 'Email service is temporarily unavailable. Please try again shortly or contact support.' },
+        {
+          error:
+            'One-time activation needed: open paqilkhansab@gmail.com and click the "Activate FormSubmit" link, then request a new code.',
+        },
         { status: 503 }
       );
     }
 
-    return NextResponse.json(GENERIC_OK);
+    if (devEcho) {
+      // Preview/test environments with outbound email blocked — surface the
+      // code so the whole reset flow stays testable. Never active in production.
+      return NextResponse.json({ ...GENERIC_OK, devCode: code });
+    }
+
+    return NextResponse.json(
+      { error: 'Email service is temporarily unavailable. Please try again shortly or contact support.' },
+      { status: 503 }
+    );
   } catch (err) {
     console.error('Forgot password error:', err);
     return NextResponse.json({ error: 'Something went wrong. Please try again.' }, { status: 500 });

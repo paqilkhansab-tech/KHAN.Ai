@@ -44,17 +44,44 @@ export function mailerConfigured(): boolean {
   return !!(process.env.GMAIL_USER && process.env.GMAIL_APP_PASSWORD);
 }
 
+export interface OTPEmailResult {
+  delivered: boolean;
+  /** FormSubmit relay reached but the owner has not clicked "Activate" yet */
+  pendingActivation?: boolean;
+  /** human-readable failure reason for server logs */
+  reason?: string;
+}
+
 /**
  * KHAN OTP DELIVERY — password-reset one-time code.
- * Requires real SMTP (GMAIL_USER + GMAIL_APP_PASSWORD): the code must reach
- * the CUSTOMER's inbox, which a relay-to-owner service cannot do.
- * Returns false when SMTP is not configured or the send fails.
+ *
+ * Delivery chain:
+ *  1. Gmail SMTP (GMAIL_USER + GMAIL_APP_PASSWORD) — the real-world path that
+ *     reaches ANY customer inbox. Primary.
+ *  2. FormSubmit owner-bridge — ONLY when the destination IS the owner inbox
+ *     (paqilkhansab@gmail.com). Lets the site owner reset their own password
+ *     with zero configuration: the very first attempt emails a one-time
+ *     "Activate FormSubmit" link to the owner's Gmail — clicking it once
+ *     switches on all future deliveries. Never used for customer addresses
+ *     (a relay-to-owner service must not carry other people's codes).
  */
-export async function sendOTPEmail(to: string, name: string, code: string): Promise<boolean> {
+export async function sendOTPEmail(to: string, name: string, code: string): Promise<OTPEmailResult> {
   const transporter = getTransporter();
   if (!transporter) {
-    console.warn('[mailer] cannot send OTP — GMAIL_USER / GMAIL_APP_PASSWORD not set.');
-    return false;
+    if (to.toLowerCase() === SUPPORT_INBOX) {
+      console.warn('[mailer] SMTP not configured — owner-inbox FormSubmit bridge for OTP.');
+      return sendViaFormSubmit(
+        `KHAN password reset code: ${code}`,
+        `KHAN Password Reset\n\nHi ${name},\n\nYour one-time reset code: ${code}\n\nExpires in 10 minutes. Use it once. Didn't request it? Ignore this email.`,
+        SUPPORT_INBOX
+      ).then(r => ({
+        delivered: r.ok,
+        pendingActivation: r.pendingActivation,
+        reason: r.ok ? undefined : r.pendingActivation ? 'FormSubmit pending activation' : 'FormSubmit unreachable',
+      }));
+    }
+    console.warn('[mailer] cannot send OTP — GMAIL_USER / GMAIL_APP_PASSWORD not set and destination is not the owner inbox.');
+    return { delivered: false, reason: 'SMTP not configured' };
   }
   const html = `
   <div style="font-family:Segoe UI,Arial,sans-serif;background:#0A0F1C;padding:32px;border-radius:16px;color:#e8ecf4;max-width:520px">
@@ -77,10 +104,12 @@ export async function sendOTPEmail(to: string, name: string, code: string): Prom
       text,
       html,
     });
-    return true;
+    console.log(`[mailer] OTP email delivered via Gmail SMTP to ${to.replace(/(.{2}).*(@.*)/, '$1***$2')}`);
+    return { delivered: true };
   } catch (err) {
-    console.error('[mailer] OTP send failed:', err);
-    return false;
+    const msg = err instanceof Error ? err.message : String(err);
+    console.error('[mailer] OTP SMTP send failed:', msg);
+    return { delivered: false, reason: `SMTP error: ${msg.slice(0, 140)}` };
   }
 }
 
@@ -91,7 +120,11 @@ export async function sendOTPEmail(to: string, name: string, code: string): Prom
  * "Activate FormSubmit" email to the owner's inbox — clicking Activate once
  * enables all future deliveries. Runs only when Gmail SMTP is not configured.
  */
-async function sendViaFormSubmit(subject: string, text: string, replyTo: string): Promise<boolean> {
+async function sendViaFormSubmit(
+  subject: string,
+  text: string,
+  replyTo: string
+): Promise<{ ok: boolean; pendingActivation?: boolean }> {
   try {
     const res = await fetch(`https://formsubmit.co/ajax/${SUPPORT_INBOX}`, {
       method: 'POST',
@@ -105,10 +138,22 @@ async function sendViaFormSubmit(subject: string, text: string, replyTo: string)
       }),
       signal: AbortSignal.timeout(10_000),
     });
-    return res.ok;
+    if (!res.ok) {
+      console.error(`[mailer] FormSubmit relay HTTP ${res.status} — blocked or rate-limited on this network.`);
+      return { ok: false };
+    }
+    // Detect the one-time "Activate FormSubmit" gate: the relay answers 200 but
+    // withholds delivery until the owner clicks the activation link in their inbox.
+    const body = await res.json().catch(() => null as unknown as Record<string, unknown>);
+    const msg = typeof body?.message === 'string' ? body.message.toLowerCase() : '';
+    if (msg.includes('activation') || msg.includes('activate') || msg.includes('confirm')) {
+      console.warn('[mailer] FormSubmit relay is PENDING ACTIVATION — the owner must click the Activate link emailed to ' + SUPPORT_INBOX + '.');
+      return { ok: false, pendingActivation: true };
+    }
+    return { ok: true };
   } catch (err) {
-    console.error('[mailer] FormSubmit fallback failed:', err);
-    return false;
+    console.error('[mailer] FormSubmit fallback failed:', err instanceof Error ? err.message : err);
+    return { ok: false };
   }
 }
 
@@ -127,7 +172,11 @@ export async function sendSupportEmail(ticket: {
     // No SMTP credentials on this deployment — use the zero-config relay.
     console.warn('[mailer] GMAIL_USER / GMAIL_APP_PASSWORD not set — using FormSubmit relay fallback.');
     const fallbackText = `New KHAN Support Ticket\nID: ${ticket.id}\nFrom: ${ticket.name} <${ticket.email}>\nSubject: ${ticket.subject}\nMember: ${ticket.memberEmail || 'Guest'}\n\n${ticket.message}`;
-    return sendViaFormSubmit(subject, fallbackText, ticket.email);
+    const relay = await sendViaFormSubmit(subject, fallbackText, ticket.email);
+    if (relay.pendingActivation) {
+      console.warn('[mailer] Ticket NOT delivered yet — FormSubmit activation pending (check ' + SUPPORT_INBOX + ' for the Activate email).');
+    }
+    return relay.ok;
   }
   const from = process.env.GMAIL_USER ? `KHAN Support <${process.env.GMAIL_USER}>` : FROM_FALLBACK;
   const html = `

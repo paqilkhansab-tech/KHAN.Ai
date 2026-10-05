@@ -89,6 +89,9 @@ export default function AuthModal({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const [errKey, setErrKey] = useState(0);
+  // Preview test-mode surfaces (empty in production — API never sends them there)
+  const [devCode, setDevCode] = useState('');
+  const [devHint, setDevHint] = useState('');
   const emailRef = useRef<HTMLInputElement>(null);
   const reduced = useReducedMotion();
 
@@ -100,6 +103,8 @@ export default function AuthModal({
       setOtp('');
       setError('');
       setShowPw(false);
+      setDevCode('');
+      setDevHint('');
       const t = setTimeout(() => emailRef.current?.focus(), 420);
       return () => clearTimeout(t);
     }
@@ -131,6 +136,8 @@ export default function AuthModal({
   const switchMode = (m: 'signin' | 'signup' | 'forgot') => {
     setMode(m);
     setError('');
+    setDevCode('');
+    setDevHint('');
     if (m === 'forgot') setForgotStep(1);
   };
 
@@ -153,9 +160,19 @@ export default function AuthModal({
             setErrKey(k => k + 1);
             return;
           }
-          toast.success(data.message || 'Reset code sent — check your inbox.');
           setForgotStep(2);
           setError('');
+          if (data.devHint) {
+            // preview-only: no account for this email
+            setDevHint(data.devHint);
+          } else if (data.devCode) {
+            // preview-only: outbound email blocked here — show the code on the card
+            setDevCode(data.devCode);
+            setOtp(data.devCode);
+            toast.success('Preview mode — your code is on the card below.');
+          } else {
+            toast.success(data.message || 'Reset code sent — check your inbox.');
+          }
           return;
         }
         // STEP 2 — verify OTP + set new password
@@ -368,6 +385,31 @@ export default function AuthModal({
                 >
                   {showPw ? <EyeOff size={16} /> : <Eye size={16} />}
                 </button>
+              </div>
+            )}
+
+            {mode === 'forgot' && forgotStep === 1 && devHint && (
+              <div
+                role="status"
+                className="mb-4 rounded-lg border border-[rgba(201,162,75,.45)] bg-[rgba(201,162,75,.08)] px-3.5 py-2.5 text-[12.5px]"
+                style={{ color: 'var(--khan-gold)' }}
+              >
+                ℹ {devHint}
+              </div>
+            )}
+
+            {mode === 'forgot' && forgotStep === 2 && devCode && (
+              <div className="mb-4 rounded-lg border border-[rgba(63,224,208,.45)] bg-[rgba(63,224,208,.08)] px-3.5 py-2.5 text-[12.5px]">
+                <span className="font-semibold" style={{ color: 'var(--khan-cyan)' }}>
+                  Preview mode
+                </span>
+                <span className="text-[var(--khan-muted)]"> — email delivery is off in this sandbox, so here is your code:{' '}</span>
+                <span className="font-mono-khan text-[17px] font-bold tracking-[5px]" style={{ color: 'var(--khan-gold)' }}>
+                  {devCode}
+                </span>
+                <div className="mt-1 text-[11px] text-[var(--khan-muted)]">
+                  On your live (hosted) website the code arrives by email instead.
+                </div>
               </div>
             )}
 
