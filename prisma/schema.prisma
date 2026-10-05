@@ -16,6 +16,7 @@ model User {
   createdAt      DateTime       @default(now())
   updatedAt      DateTime       @updatedAt
   lastLoginAt    DateTime?
+  lastSeenAt     DateTime?  // heartbeat — refreshed (max 1x/5min) whenever the logged-in user loads a page; powers DAU/WAU/MAU
   watchlist      WatchlistItem[]
   chatMessages   ChatMessage[]
   resetOTPs      PasswordResetOTP[]

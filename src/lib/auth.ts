@@ -80,6 +80,7 @@ export async function getCurrentUser() {
       phone: true,
       createdAt: true,
       lastLoginAt: true,
+      lastSeenAt: true,
     },
   });
   return user;
