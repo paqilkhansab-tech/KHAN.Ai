@@ -42,7 +42,7 @@ export async function POST(req: NextRequest) {
     if (!mailerConfigured() && !devEcho) {
       console.error('[forgot-password] No email channel configured (set GMAIL_USER + GMAIL_APP_PASSWORD) — cannot deliver OTP.');
       return NextResponse.json(
-        { error: 'Email service is temporarily unavailable. Please try again shortly or contact support.' },
+        { error: 'Email service is temporarily unavailable. Please try again shortly, or call customer care: 9494490006.' },
         { status: 503 }
       );
     }
@@ -109,7 +109,7 @@ export async function POST(req: NextRequest) {
     }
 
     return NextResponse.json(
-      { error: 'Email service is temporarily unavailable. Please try again shortly or contact support.' },
+      { error: 'Email service is temporarily unavailable. Please try again shortly, or call customer care: 9494490006.' },
       { status: 503 }
     );
   } catch (err) {

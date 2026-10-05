@@ -241,3 +241,5 @@
 .khan-scroll::-webkit-scrollbar-thumb:hover { background: #2f3d5c; }
 
 html { scroll-behavior: smooth; }
+
+/* cache-bust 2026-10-06: fresh CSS chunk hash for preview tunnel */
