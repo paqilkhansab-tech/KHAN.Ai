@@ -1,17 +1,25 @@
 import { SignJWT, jwtVerify } from 'jose';
+import { randomBytes } from 'crypto';
 import { cookies } from 'next/headers';
 import { db } from '@/lib/db';
 
 /**
- * KHAN session secret — MUST come from environment.
- * Production refuses to boot without it; development falls back to a
- * locally-generated random secret so sessions survive `next dev` restarts.
+ * KHAN session secret — MUST come from environment (AUTH_SECRET).
+ * - production with AUTH_SECRET set: uses it (recommended, sessions survive restarts)
+ * - production without it: generates an ephemeral cryptographically-random secret
+ *   (fail-secure: tokens can never be forged; sessions reset on restart) + loud warning
+ * - development: stable local fallback for DX
  */
 function loadSecret(): Uint8Array {
   const secret = process.env.AUTH_SECRET;
   if (secret && secret.length >= 32) return new TextEncoder().encode(secret);
   if (process.env.NODE_ENV === 'production') {
-    throw new Error('AUTH_SECRET missing or too short — set a 64+ char random value in .env');
+    console.warn(
+      '[KHAN SECURITY] AUTH_SECRET is not set — using an ephemeral random secret. ' +
+      'Sessions will not survive restarts. Set a 64+ char random value in your environment: ' +
+      'openssl rand -base64 48'
+    );
+    return new TextEncoder().encode(randomBytes(48).toString('base64url'));
   }
   // dev-only fallback (never used in production builds)
   return new TextEncoder().encode('khan-dev-only-secret-do-not-use-in-production-0123456789');

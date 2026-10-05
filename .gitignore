@@ -58,3 +58,6 @@ server.log
 /download/
 /upload/
 /worklog.md
+
+# runtime artifacts
+.zscripts/dev.pid
