@@ -60,6 +60,13 @@ const nextConfig: NextConfig = {
         source: "/:path*",
         headers: securityHeaders,
       },
+      {
+        // public assets (logo etc.) — cache hard on the client + CDN
+        source: "/:asset(logo.png|logo.svg|robots.txt|icon.png|apple-icon.png)",
+        headers: [
+          { key: "Cache-Control", value: "public, max-age=86400, stale-while-revalidate=604800" },
+        ],
+      },
     ];
   },
 };

@@ -1,9 +1,13 @@
 'use client';
 
-import { useMemo, useRef, useState, useEffect } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { Canvas, useFrame } from '@react-three/fiber';
 import { Float } from '@react-three/drei';
 import * as THREE from 'three';
+
+// Performance: 48 segments is visually identical to 96 at coin sizes but halves
+// vertex count on every coin mesh (5 coins x 4 meshes each).
+const SEGMENTS = 48;
 
 /* ---------- Gold coin face texture (Bitcoin ₿) ---------- */
 function makeCoinFaceTexture(label: string, bg1: string, bg2: string, fg: string) {
@@ -84,22 +88,22 @@ function Coin({
     <group>
       {/* faces */}
       <mesh rotation={[Math.PI / 2, 0, 0]} castShadow>
-        <cylinderGeometry args={[radius, radius, thickness, 96]} />
+        <cylinderGeometry args={[radius, radius, thickness, SEGMENTS]} />
         <meshStandardMaterial color="#E8B84B" metalness={0.55} roughness={0.3} envMapIntensity={1.2} />
       </mesh>
       {/* top face plate — cylinder rotated [PI/2,0,0] means caps face ±Z */}
       <mesh position={[0, 0, thickness / 2 + 0.002]}>
-        <circleGeometry args={[radius * 0.995, 96]} />
+        <circleGeometry args={[radius * 0.995, SEGMENTS]} />
         <meshStandardMaterial map={face} metalness={0.35} roughness={0.42} />
       </mesh>
       {/* bottom face plate */}
       <mesh position={[0, 0, -thickness / 2 - 0.002]} rotation={[0, Math.PI, 0]}>
-        <circleGeometry args={[radius * 0.995, 96]} />
+        <circleGeometry args={[radius * 0.995, SEGMENTS]} />
         <meshStandardMaterial map={face} metalness={0.35} roughness={0.42} />
       </mesh>
       {/* ridged edge */}
       <mesh rotation={[Math.PI / 2, 0, 0]}>
-        <cylinderGeometry args={[radius * 1.001, radius * 1.001, thickness * 0.98, 96, 1, true]} />
+        <cylinderGeometry args={[radius * 1.001, radius * 1.001, thickness * 0.98, SEGMENTS, 1, true]} />
         <meshStandardMaterial map={edge} color="#FFFFFF" metalness={0.5} roughness={0.4} />
       </mesh>
     </group>
@@ -129,7 +133,7 @@ function Orbiter({
 }
 
 /* ---------- Particle starfield ---------- */
-function Particles({ count = 420 }: { count?: number }) {
+function Particles({ count = 240 }: { count?: number }) {
   const ref = useRef<THREE.Points>(null);
   const positions = useMemo(() => {
     const arr = new Float32Array(count * 3);
@@ -221,6 +225,21 @@ function Scene() {
 
 export default function Hero3D() {
   const [failed, setFailed] = useState(false);
+  const wrapRef = useRef<HTMLDivElement>(null);
+  const [visible, setVisible] = useState(true);
+
+  // Performance gate: fully pause the WebGL render loop while the hero is
+  // scrolled out of view — no GPU/CPU burn while users read the rest of the page.
+  useEffect(() => {
+    const el = wrapRef.current;
+    if (!el || typeof IntersectionObserver === 'undefined') return;
+    const io = new IntersectionObserver(
+      ([entry]) => setVisible(entry.isIntersecting),
+      { rootMargin: '80px' }
+    );
+    io.observe(el);
+    return () => io.disconnect();
+  }, []);
 
   if (failed) {
     return (
@@ -231,12 +250,13 @@ export default function Hero3D() {
   }
 
   return (
-    <div className="relative aspect-square w-full max-w-[460px] mx-auto">
+    <div ref={wrapRef} className="relative aspect-square w-full max-w-[460px] mx-auto">
       <div className="pointer-events-none absolute inset-[-12%] rounded-full bg-[radial-gradient(circle,rgba(63,224,208,0.16)_0%,rgba(201,162,75,0.12)_45%,transparent_72%)] blur-md" />
       <Canvas
         camera={{ position: [0, 0.6, 4.6], fov: 42 }}
-        dpr={[1, 2]}
-        gl={{ antialias: true, alpha: true }}
+        dpr={[1, 1.6]}
+        frameloop={visible ? 'always' : 'never'}
+        gl={{ antialias: true, alpha: true, powerPreference: 'high-performance' }}
         onError={() => setFailed(true)}
         style={{ width: '100%', height: '100%' }}
         aria-label="Interactive 3D Bitcoin model — rotating gold coin with orbiting crypto satellites"

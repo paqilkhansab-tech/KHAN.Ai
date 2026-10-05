@@ -17,56 +17,108 @@ export interface CryptoAsset {
   tags: string[];
 }
 
-export function useCryptoFeed() {
-  const [assets, setAssets] = useState<CryptoAsset[]>([]);
-  const [source, setSource] = useState<'live' | 'fallback'>('fallback');
+/* ------------------------------------------------------------------ */
+/* SHARED MARKET FEED STORE — performance fix                          */
+/* Ticker, CryptoSection and StockSection used to each run their own   */
+/* fetch + interval (2x network churn). Every consumer now shares one  */
+/* TTL-cached request per feed: the first caller triggers the fetch,   */
+/* everyone else reuses the in-flight/cached result.                   */
+/* ------------------------------------------------------------------ */
+function createFeed<T>(url: string, ttlMs: number) {
+  let data: T | null = null;
+  let ts = 0;
+  let inflight: Promise<T | null> | null = null;
 
-  useEffect(() => {
-    let alive = true;
-    const load = async () => {
+  async function load(): Promise<T | null> {
+    if (data && Date.now() - ts < ttlMs) return data; // fresh cache
+    if (inflight) return inflight; // dedupe concurrent callers
+    inflight = (async () => {
       try {
-        const res = await fetch('/api/market/crypto', { cache: 'no-store' });
-        const data = await res.json();
-        if (alive && data.assets) {
-          setAssets(data.assets);
-          setSource(data.source);
-        }
+        const res = await fetch(url, { cache: 'no-store' });
+        const json = await res.json();
+        data = json as T;
+        ts = Date.now();
+        return data;
       } catch {
-        /* keep old data */
+        return data; // keep old data on failure
+      } finally {
+        inflight = null;
       }
-    };
-    load();
-    const t = setInterval(load, 90_000);
-    return () => {
-      alive = false;
-      clearInterval(t);
-    };
-  }, []);
+    })();
+    return inflight;
+  }
 
-  return { assets, source };
+  return function useFeed(): T | null {
+    const [state, setState] = useState<T | null>(data);
+    useEffect(() => {
+      let alive = true;
+      load().then(d => {
+        if (alive && d) setState(d);
+      });
+      const t = setInterval(() => {
+        load().then(d => {
+          if (alive && d) setState(d);
+        });
+      }, ttlMs);
+      return () => {
+        alive = false;
+        clearInterval(t);
+      };
+    }, []);
+    return state;
+  };
 }
 
+const useCryptoStore = createFeed<{ assets: CryptoAsset[]; source: 'live' | 'fallback' }>(
+  '/api/market/crypto',
+  90_000
+);
+
+export function useCryptoFeed() {
+  const data = useCryptoStore();
+  return { assets: data?.assets ?? [], source: data?.source ?? ('fallback' as const) };
+}
+
+/** Full quote shape served by /api/market/stocks (superset of the ticker chip). */
+interface FullStockItem extends StockFeedItem {
+  sector: string;
+  volume: string;
+  about: string;
+  spark: number[];
+  open: number;
+  dayHigh: number;
+  dayLow: number;
+}
+interface StockFeedResponse {
+  stocks: FullStockItem[];
+  indices: IndexFeedItem[];
+  sessions: { us: 'open' | 'closed'; india: 'open' | 'closed'; utc: string };
+  note: string;
+}
+interface IndexFeedItem {
+  symbol: string;
+  name: string;
+  price: number;
+  changePct: number;
+  spark: number[];
+  [k: string]: unknown;
+}
+const useStockStore = createFeed<StockFeedResponse>('/api/market/stocks', 60_000);
+
 export function useStockFeed() {
-  const [stocks, setStocks] = useState<StockFeedItem[]>([]);
-  useEffect(() => {
-    let alive = true;
-    const load = async () => {
-      try {
-        const res = await fetch('/api/market/stocks', { cache: 'no-store' });
-        const data = await res.json();
-        if (alive && data.stocks) setStocks(data.stocks);
-      } catch {
-        /* keep old data */
-      }
-    };
-    load();
-    const t = setInterval(load, 30_000);
-    return () => {
-      alive = false;
-      clearInterval(t);
-    };
-  }, []);
-  return stocks;
+  const data = useStockStore();
+  return data?.stocks ?? [];
+}
+
+/** Full stock response (stocks + indices + sessions) — used by StockSection. */
+export function useStockDetail() {
+  const data = useStockStore();
+  return {
+    stocks: data?.stocks ?? [],
+    indices: (data?.indices ?? []) as IndexFeedItem[],
+    sessions: data?.sessions ?? null,
+    note: data?.note ?? '',
+  };
 }
 
 export interface StockFeedItem {

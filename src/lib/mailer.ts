@@ -44,6 +44,34 @@ export function mailerConfigured(): boolean {
   return !!(process.env.GMAIL_USER && process.env.GMAIL_APP_PASSWORD);
 }
 
+/**
+ * ZERO-CONFIG FALLBACK — FormSubmit relay.
+ * Forwards the ticket to the owner's Gmail via formsubmit.co's AJAX endpoint.
+ * Requires no credentials. The VERY FIRST submission triggers a one-time
+ * "Activate FormSubmit" email to the owner's inbox — clicking Activate once
+ * enables all future deliveries. Runs only when Gmail SMTP is not configured.
+ */
+async function sendViaFormSubmit(subject: string, text: string, replyTo: string): Promise<boolean> {
+  try {
+    const res = await fetch(`https://formsubmit.co/ajax/${SUPPORT_INBOX}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+      body: JSON.stringify({
+        _subject: subject,
+        _replyto: replyTo,
+        _template: 'box',
+        _captcha: 'false',
+        message: text,
+      }),
+      signal: AbortSignal.timeout(10_000),
+    });
+    return res.ok;
+  } catch (err) {
+    console.error('[mailer] FormSubmit fallback failed:', err);
+    return false;
+  }
+}
+
 export async function sendSupportEmail(ticket: {
   id: string;
   name: string;
@@ -52,10 +80,14 @@ export async function sendSupportEmail(ticket: {
   message: string;
   memberEmail?: string | null;
 }): Promise<boolean> {
+  const subject = `🎫 KHAN Ticket #${ticket.id.slice(-6).toUpperCase()} — ${ticket.subject}`.replace(/[\r\n]+/g, ' '); // header-injection safe
+
   const transporter = getTransporter();
   if (!transporter) {
-    console.warn('[mailer] GMAIL_USER / GMAIL_APP_PASSWORD not set — ticket kept in DB only.');
-    return false;
+    // No SMTP credentials on this deployment — use the zero-config relay.
+    console.warn('[mailer] GMAIL_USER / GMAIL_APP_PASSWORD not set — using FormSubmit relay fallback.');
+    const fallbackText = `New KHAN Support Ticket\nID: ${ticket.id}\nFrom: ${ticket.name} <${ticket.email}>\nSubject: ${ticket.subject}\nMember: ${ticket.memberEmail || 'Guest'}\n\n${ticket.message}`;
+    return sendViaFormSubmit(subject, fallbackText, ticket.email);
   }
   const from = process.env.GMAIL_USER ? `KHAN Support <${process.env.GMAIL_USER}>` : FROM_FALLBACK;
   const html = `

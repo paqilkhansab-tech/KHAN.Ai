@@ -1,19 +1,16 @@
 'use client';
 
-import { useEffect, useMemo, useState } from 'react';
+import { useMemo, useState } from 'react';
 import { ArrowUpRight, Activity, Search, Star, X, ShoppingBag } from 'lucide-react';
 import { toast } from 'sonner';
 import { useAuth } from './AuthProvider';
-import { useStockFeed, fmtStockPrice, ChangeTag } from './Ticker';
+import { useStockDetail, fmtStockPrice, ChangeTag } from './Ticker';
 import { StockBuyLinks } from './BuyLinks';
 
 interface StockAsset {
   symbol: string; name: string; sector: string; price: number; changePct: number; volume: string;
   currency: 'USD' | 'INR'; market: 'US' | 'IN'; about: string;
   spark: number[]; open: number; dayHigh: number; dayLow: number;
-}
-interface IndexAsset {
-  symbol: string; name: string; price: number; changePct: number; spark: number[];
 }
 
 /* ---------- sparkline ---------- */
@@ -59,31 +56,10 @@ function SessionChip({ label, state }: { label: string; state: 'open' | 'closed'
 
 export default function StockSection({ onAskKhan }: { onAskKhan: (q: string) => void }) {
   const { user, watchlist, saveToWatchlist, removeFromWatchlist } = useAuth();
-  const [stocks, setStocks] = useState<StockAsset[]>([]);
-  const [indices, setIndices] = useState<IndexAsset[]>([]);
-  const [sessions, setSessions] = useState<{ us: 'open' | 'closed'; india: 'open' | 'closed' } | null>(null);
-  const [note, setNote] = useState('');
+  const { stocks, indices, sessions, note } = useStockDetail();
   const [expanded, setExpanded] = useState<string | null>(null);
   const [query, setQuery] = useState('');
   const [filter, setFilter] = useState<'all' | 'us' | 'india' | 'gainers' | 'losers' | 'watch'>('all');
-
-  useEffect(() => {
-    let alive = true;
-    const load = async () => {
-      try {
-        const res = await fetch('/api/market/stocks', { cache: 'no-store' });
-        const data = await res.json();
-        if (!alive) return;
-        setStocks(data.stocks || []);
-        setIndices(data.indices || []);
-        setSessions(data.sessions || null);
-        setNote(data.note || '');
-      } catch { /* keep */ }
-    };
-    load();
-    const t = setInterval(load, 30_000);
-    return () => { alive = false; clearInterval(t); };
-  }, []);
 
   const watchStocks = useMemo(() => watchlist.filter(w => w.kind === 'stock'), [watchlist]);
 
