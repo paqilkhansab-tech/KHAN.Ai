@@ -72,7 +72,16 @@ export async function POST(req: NextRequest) {
     const indexLine = INDICES.map(i => `${i.name}: ${i.price.toLocaleString()} (${i.changePct >= 0 ? '+' : ''}${i.changePct}%)`).join(' | ');
     const fullSystem = `${KHAN_SYSTEM_PROMPT}\n[DEEP_MODE] ${deep ? 'ON — full multi-scenario macro-aware analysis' : 'OFF — fast mode'}\n[CRYPTO] ${cryptoLine}\n[STOCKS] ${stockLine}\n[INDICES] ${indexLine}\n[TIME] ${new Date().toUTCString()}`;
 
-    const zai = await ZAI.create();
+    let zai;
+    try {
+      zai = await ZAI.create();
+    } catch {
+      // AI credentials not configured in this environment (e.g. hosting platform)
+      return NextResponse.json(
+        { error: 'KHAN AI brain is being upgraded — chat will be back shortly. Everything else works!' },
+        { status: 503 }
+      );
+    }
     const payload = {
       messages: [
         { role: 'assistant' as const, content: fullSystem },

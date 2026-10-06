@@ -124,7 +124,13 @@ export async function POST(req: NextRequest) {
     }
     const chunks = splitChunks(speech);
 
-    const zai = await ZAI.create();
+    let zai;
+    try {
+      zai = await ZAI.create();
+    } catch {
+      // AI credentials not configured in this environment (e.g. hosting platform)
+      return NextResponse.json({ error: 'Voice engine is being configured — try again shortly.' }, { status: 503 });
+    }
     const buffers: Buffer[] = [];
     for (const chunk of chunks) {
       const response = await zai.audio.tts.create({
