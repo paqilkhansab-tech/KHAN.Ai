@@ -6,28 +6,31 @@ import { chatSchema, parse } from '@/lib/validation';
 import { rateLimit, clientIp, tooMany } from '@/lib/rate-limit';
 
 /**
- * KHAN AI BRAIN — Google Gemini 3.8 Flash via NATIVE generateContent REST API.
+ * KHAN AI BRAIN — Google Gemini 3.8 Flash via the INTERACTIONS API
+ * (https://generativelanguage.googleapis.com/v1beta/interactions).
  *
- * WHY NATIVE (not the OpenAI-compatible path): the OpenAI-compat endpoint
- * (/v1beta/openai/chat/completions with Bearer auth) HANGS from some regions
- * (e.g. Vercel hkg1) causing 504 FUNCTION_INVOCATION_TIMEOUT, while the native
- * endpoint (/v1beta/models/...:generateContent with x-goog-api-key) works —
- * proven live by our own TTS route using the exact same endpoint style.
+ * WHY INTERACTIONS: from our deployment region (Vercel hkg1) both the
+ * OpenAI-compat path AND the legacy generateContent path HANG (Vercel 504),
+ * while the Interactions API responds normally — proven live by our TTS
+ * route which uses the exact same endpoint + x-goog-api-key auth.
+ * The Interactions API is also Google's recommended going-forward API.
  *
- * Fallback chain (per request): native -> OpenAI-compat (Bearer).
- * Every network call has a hard AbortController timeout so the function can
- * never hang until Vercel's 60s kill.
+ * Stateless multi-turn: full history is replayed in `input` as typed steps
+ * (user_input / model_output) — no server-side state needed (store=false).
  *
- * Requires GEMINI_API_KEY environment variable (free: aistudio.google.com/apikey).
- * Optional GEMINI_MODEL env var to override the model id without a redeploy.
+ * Every network call has a hard AbortController timeout: worst case 3 x 15s
+ * attempts, well inside the 60s serverless cap.
+ *
+ * Requires GEMINI_API_KEY env var (free: aistudio.google.com/apikey).
+ * Optional GEMINI_MODEL env var overrides the model id without a redeploy.
  */
 
 // Vercel serverless cap (Hobby allows up to 60s) — deep mode + network need headroom.
 export const maxDuration = 60;
 
-const BASE_URL = 'https://generativelanguage.googleapis.com/v1beta';
+const INTERACTIONS_URL = 'https://generativelanguage.googleapis.com/v1beta/interactions';
 const MODEL = process.env.GEMINI_MODEL || 'gemini-3.8-flash';
-const CALL_TIMEOUT_MS = 15_000; // hard cap per brain call (hangs -> fast fallback instead of 504)
+const CALL_TIMEOUT_MS = 15_000; // hard cap per brain call
 
 const fmtStockLine = (s: typeof STOCK_BASELINES[number]) =>
   `${s.symbol} (${s.market === 'IN' ? 'India' : 'US'}): ${s.currency === 'INR' ? '₹' : '$'}${s.price.toLocaleString('en-IN')} (${s.changePct >= 0 ? '+' : ''}${s.changePct}%)`;
@@ -76,11 +79,22 @@ const KEY_MISSING_MESSAGE =
 
 type ChatMsg = { role: 'user' | 'assistant'; content: string };
 
+/** Interactions API step shape (stateless history replay). */
+type InteractionStep = {
+  type: 'user_input' | 'model_output';
+  content: { type: 'text'; text: string }[];
+};
+
+const toStep = (m: ChatMsg): InteractionStep => ({
+  type: m.role === 'assistant' ? 'model_output' : 'user_input',
+  content: [{ type: 'text', text: m.content }],
+});
+
 /** Extract a short, human-readable error string from a Google error response. */
 async function googleErrorDetail(res: Response): Promise<string> {
   const raw = await res.text().catch(() => '');
   try {
-    const j = JSON.parse(raw) as { error?: { message?: string; status?: string } };
+    const j = JSON.parse(raw) as { error?: { message?: string } };
     if (j?.error?.message) return j.error.message.slice(0, 200);
   } catch { /* not JSON */ }
   return raw.slice(0, 200);
@@ -98,89 +112,65 @@ async function fetchWithTimeout(url: string, init: RequestInit, ms = CALL_TIMEOU
 }
 
 /**
- * PRIMARY: one native generateContent call (x-goog-api-key auth).
- * Works from regions where the OpenAI-compat path hangs (proven by TTS route).
+ * One Interactions API text-generation call (x-goog-api-key auth).
+ * thinkingLevel: 'low' = fast mode; undefined = dynamic thinking (deep mode).
+ * historySteps replays the full conversation statelessly.
+ * lastUserOnly: retry shape that drops history (minimal, always-parseable input).
  */
-async function callBrainNative(
+async function callBrain(
   apiKey: string,
   system: string,
-  messages: ChatMsg[],
-  thinkingBudget?: number
+  historySteps: InteractionStep[],
+  thinkingLevel?: 'low' | 'high',
+  lastUserOnly = false
 ): Promise<string> {
-  const res = await fetchWithTimeout(`${BASE_URL}/models/${MODEL}:generateContent`, {
+  const input = lastUserOnly ? historySteps.slice(-1) : historySteps;
+
+  const res = await fetchWithTimeout(INTERACTIONS_URL, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
       'x-goog-api-key': apiKey,
     },
     body: JSON.stringify({
-      systemInstruction: { parts: [{ text: system }] },
-      contents: messages.map(m => ({
-        role: m.role === 'assistant' ? 'model' : 'user',
-        parts: [{ text: m.content }],
-      })),
-      // thinkingBudget 0 = instant fast mode; omit = dynamic thinking (deep mode).
-      ...(thinkingBudget !== undefined
-        ? { generationConfig: { thinkingConfig: { thinkingBudget } } }
+      model: MODEL,
+      system_instruction: system,
+      input,
+      store: false, // stateless — don't retain conversations on Google servers
+      ...(thinkingLevel
+        ? { generation_config: { thinking_level: thinkingLevel } }
         : {}),
     }),
   });
 
   if (!res.ok) {
     const detail = await googleErrorDetail(res);
-    const err = new Error(`Gemini native ${res.status}: ${detail}`);
+    const err = new Error(`Gemini interactions ${res.status}${lastUserOnly ? ' (lastUserOnly)' : ''}: ${detail}`);
     (err as Error & { status?: number }).status = res.status;
     throw err;
   }
 
   const data = (await res.json()) as {
-    candidates?: { content?: { parts?: { text?: string }[] }; finishReason?: string }[];
-    promptFeedback?: { blockReason?: string };
+    output_text?: string;
+    steps?: {
+      type?: string;
+      content?: { type?: string; text?: string }[];
+    }[];
   };
 
-  if (data.promptFeedback?.blockReason) {
-    throw new Error(`Gemini blocked the prompt: ${data.promptFeedback.blockReason}`);
+  // Preferred: top-level convenience field, when present.
+  if (typeof data.output_text === 'string' && data.output_text.trim()) {
+    return data.output_text;
   }
-  const text = (data.candidates?.[0]?.content?.parts || [])
-    .map(p => p.text || '')
+  // Fallback: last model_output step -> concatenated text parts.
+  const text = (data.steps || [])
+    .filter(s => s?.type === 'model_output')
+    .flatMap(s => s.content || [])
+    .filter(c => c?.type === 'text' && typeof c.text === 'string')
+    .map(c => c.text)
     .join('')
     .trim();
-  if (!text) throw new Error('Gemini returned an empty candidate.');
-  return text;
-}
-
-/** FALLBACK: OpenAI-compatible chat-completions (Bearer auth). */
-async function callBrainOpenAI(
-  apiKey: string,
-  system: string,
-  messages: ChatMsg[],
-  reasoningEffort?: 'low' | 'medium' | 'high' | 'none'
-): Promise<string> {
-  const res = await fetchWithTimeout(`${BASE_URL}/openai/chat/completions`, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      Authorization: `Bearer ${apiKey}`,
-    },
-    body: JSON.stringify({
-      model: MODEL,
-      messages: [{ role: 'system', content: system }, ...messages],
-      ...(reasoningEffort ? { reasoning_effort: reasoningEffort } : {}),
-    }),
-  });
-
-  if (!res.ok) {
-    const detail = await googleErrorDetail(res);
-    const err = new Error(`Gemini openai-compat ${res.status}: ${detail}`);
-    (err as Error & { status?: number }).status = res.status;
-    throw err;
-  }
-
-  const data = (await res.json()) as {
-    choices?: { message?: { content?: string } }[];
-  };
-  const text = data.choices?.[0]?.message?.content || '';
-  if (!text.trim()) throw new Error('Gemini openai-compat returned empty content.');
+  if (!text) throw new Error('Gemini interactions returned no text payload.');
   return text;
 }
 
@@ -215,34 +205,30 @@ export async function POST(req: NextRequest) {
     const indexLine = INDICES.map(i => `${i.name}: ${i.price.toLocaleString()} (${i.changePct >= 0 ? '+' : ''}${i.changePct}%)`).join(' | ');
     const fullSystem = `${KHAN_SYSTEM_PROMPT}\n[DEEP_MODE] ${deep ? 'ON — full multi-scenario macro-aware analysis' : 'OFF — fast mode'}\n[CRYPTO] ${cryptoLine}\n[STOCKS] ${stockLine}\n[INDICES] ${indexLine}\n[TIME] ${new Date().toUTCString()}`;
 
+    const historySteps = messages.map(toStep);
+
     let replyText = '';
     const attempts: string[] = [];
     try {
       if (deep) {
-        // Deep mode: dynamic thinking — native first, then OpenAI-compat fallback.
+        // Deep mode: dynamic thinking -> retry with history dropped.
         try {
-          replyText = await callBrainNative(apiKey, fullSystem, messages);
+          replyText = await callBrain(apiKey, fullSystem, historySteps);
         } catch (e) {
           attempts.push(String(e instanceof Error ? e.message : e));
-          replyText = await callBrainOpenAI(apiKey, fullSystem, messages);
+          replyText = await callBrain(apiKey, fullSystem, historySteps, undefined, true);
         }
       } else {
-        // Fast mode: skip thinking via thinkingBudget 0 (native), then no-config
-        // native, then OpenAI-compat fast as last resort.
+        // Fast mode: thinking_level low -> dynamic -> history dropped.
         try {
-          replyText = await callBrainNative(apiKey, fullSystem, messages, 0);
+          replyText = await callBrain(apiKey, fullSystem, historySteps, 'low');
         } catch (e) {
           attempts.push(String(e instanceof Error ? e.message : e));
           try {
-            replyText = await callBrainNative(apiKey, fullSystem, messages);
+            replyText = await callBrain(apiKey, fullSystem, historySteps);
           } catch (e2) {
             attempts.push(String(e2 instanceof Error ? e2.message : e2));
-            try {
-              replyText = await callBrainOpenAI(apiKey, fullSystem, messages, 'none');
-            } catch (e3) {
-              attempts.push(String(e3 instanceof Error ? e3.message : e3));
-              replyText = await callBrainOpenAI(apiKey, fullSystem, messages);
-            }
+            replyText = await callBrain(apiKey, fullSystem, historySteps, 'low', true);
           }
         }
       }
