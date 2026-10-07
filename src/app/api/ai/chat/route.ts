@@ -6,18 +6,28 @@ import { chatSchema, parse } from '@/lib/validation';
 import { rateLimit, clientIp, tooMany } from '@/lib/rate-limit';
 
 /**
- * KHAN AI BRAIN — Google Gemini 2.5 Flash via plain REST (OpenAI-compatible endpoint).
- * Zero sandbox SDK — works on any hosting platform (Vercel included).
+ * KHAN AI BRAIN — Google Gemini 3.8 Flash via NATIVE generateContent REST API.
+ *
+ * WHY NATIVE (not the OpenAI-compatible path): the OpenAI-compat endpoint
+ * (/v1beta/openai/chat/completions with Bearer auth) HANGS from some regions
+ * (e.g. Vercel hkg1) causing 504 FUNCTION_INVOCATION_TIMEOUT, while the native
+ * endpoint (/v1beta/models/...:generateContent with x-goog-api-key) works —
+ * proven live by our own TTS route using the exact same endpoint style.
+ *
+ * Fallback chain (per request): native -> OpenAI-compat (Bearer).
+ * Every network call has a hard AbortController timeout so the function can
+ * never hang until Vercel's 60s kill.
+ *
  * Requires GEMINI_API_KEY environment variable (free: aistudio.google.com/apikey).
- * To add a second brain later (e.g. DeepSeek): swap BASE_URL + MODEL — the payload
- * is standard OpenAI chat-completions shape, nothing else changes.
+ * Optional GEMINI_MODEL env var to override the model id without a redeploy.
  */
 
 // Vercel serverless cap (Hobby allows up to 60s) — deep mode + network need headroom.
 export const maxDuration = 60;
 
-const BASE_URL = 'https://generativelanguage.googleapis.com/v1beta/openai';
-const MODEL = 'gemini-3.8-flash';
+const BASE_URL = 'https://generativelanguage.googleapis.com/v1beta';
+const MODEL = process.env.GEMINI_MODEL || 'gemini-3.8-flash';
+const CALL_TIMEOUT_MS = 15_000; // hard cap per brain call (hangs -> fast fallback instead of 504)
 
 const fmtStockLine = (s: typeof STOCK_BASELINES[number]) =>
   `${s.symbol} (${s.market === 'IN' ? 'India' : 'US'}): ${s.currency === 'INR' ? '₹' : '$'}${s.price.toLocaleString('en-IN')} (${s.changePct >= 0 ? '+' : ''}${s.changePct}%)`;
@@ -66,14 +76,87 @@ const KEY_MISSING_MESSAGE =
 
 type ChatMsg = { role: 'user' | 'assistant'; content: string };
 
-/** One chat-completions call to the Gemini OpenAI-compatible endpoint. */
-async function callBrain(
+/** Extract a short, human-readable error string from a Google error response. */
+async function googleErrorDetail(res: Response): Promise<string> {
+  const raw = await res.text().catch(() => '');
+  try {
+    const j = JSON.parse(raw) as { error?: { message?: string; status?: string } };
+    if (j?.error?.message) return j.error.message.slice(0, 200);
+  } catch { /* not JSON */ }
+  return raw.slice(0, 200);
+}
+
+/** fetch with hard timeout — a hung connection throws instead of eating the 60s budget. */
+async function fetchWithTimeout(url: string, init: RequestInit, ms = CALL_TIMEOUT_MS): Promise<Response> {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), ms);
+  try {
+    return await fetch(url, { ...init, signal: ctrl.signal });
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/**
+ * PRIMARY: one native generateContent call (x-goog-api-key auth).
+ * Works from regions where the OpenAI-compat path hangs (proven by TTS route).
+ */
+async function callBrainNative(
+  apiKey: string,
+  system: string,
+  messages: ChatMsg[],
+  thinkingBudget?: number
+): Promise<string> {
+  const res = await fetchWithTimeout(`${BASE_URL}/models/${MODEL}:generateContent`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'x-goog-api-key': apiKey,
+    },
+    body: JSON.stringify({
+      systemInstruction: { parts: [{ text: system }] },
+      contents: messages.map(m => ({
+        role: m.role === 'assistant' ? 'model' : 'user',
+        parts: [{ text: m.content }],
+      })),
+      // thinkingBudget 0 = instant fast mode; omit = dynamic thinking (deep mode).
+      ...(thinkingBudget !== undefined
+        ? { generationConfig: { thinkingConfig: { thinkingBudget } } }
+        : {}),
+    }),
+  });
+
+  if (!res.ok) {
+    const detail = await googleErrorDetail(res);
+    const err = new Error(`Gemini native ${res.status}: ${detail}`);
+    (err as Error & { status?: number }).status = res.status;
+    throw err;
+  }
+
+  const data = (await res.json()) as {
+    candidates?: { content?: { parts?: { text?: string }[] }; finishReason?: string }[];
+    promptFeedback?: { blockReason?: string };
+  };
+
+  if (data.promptFeedback?.blockReason) {
+    throw new Error(`Gemini blocked the prompt: ${data.promptFeedback.blockReason}`);
+  }
+  const text = (data.candidates?.[0]?.content?.parts || [])
+    .map(p => p.text || '')
+    .join('')
+    .trim();
+  if (!text) throw new Error('Gemini returned an empty candidate.');
+  return text;
+}
+
+/** FALLBACK: OpenAI-compatible chat-completions (Bearer auth). */
+async function callBrainOpenAI(
   apiKey: string,
   system: string,
   messages: ChatMsg[],
   reasoningEffort?: 'low' | 'medium' | 'high' | 'none'
 ): Promise<string> {
-  const res = await fetch(`${BASE_URL}/chat/completions`, {
+  const res = await fetchWithTimeout(`${BASE_URL}/openai/chat/completions`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
@@ -82,15 +165,13 @@ async function callBrain(
     body: JSON.stringify({
       model: MODEL,
       messages: [{ role: 'system', content: system }, ...messages],
-      // Fast mode skips internal reasoning (near-instant); deep mode lets
-      // Gemini think dynamically (omitting the field = dynamic thinking).
       ...(reasoningEffort ? { reasoning_effort: reasoningEffort } : {}),
     }),
   });
 
   if (!res.ok) {
-    const detail = await res.text().catch(() => '');
-    const err = new Error(`Gemini ${res.status}: ${detail.slice(0, 300)}`);
+    const detail = await googleErrorDetail(res);
+    const err = new Error(`Gemini openai-compat ${res.status}: ${detail}`);
     (err as Error & { status?: number }).status = res.status;
     throw err;
   }
@@ -98,7 +179,9 @@ async function callBrain(
   const data = (await res.json()) as {
     choices?: { message?: { content?: string } }[];
   };
-  return data.choices?.[0]?.message?.content || '';
+  const text = data.choices?.[0]?.message?.content || '';
+  if (!text.trim()) throw new Error('Gemini openai-compat returned empty content.');
+  return text;
 }
 
 export async function POST(req: NextRequest) {
@@ -132,28 +215,44 @@ export async function POST(req: NextRequest) {
     const indexLine = INDICES.map(i => `${i.name}: ${i.price.toLocaleString()} (${i.changePct >= 0 ? '+' : ''}${i.changePct}%)`).join(' | ');
     const fullSystem = `${KHAN_SYSTEM_PROMPT}\n[DEEP_MODE] ${deep ? 'ON — full multi-scenario macro-aware analysis' : 'OFF — fast mode'}\n[CRYPTO] ${cryptoLine}\n[STOCKS] ${stockLine}\n[INDICES] ${indexLine}\n[TIME] ${new Date().toUTCString()}`;
 
-    let replyText: string;
+    let replyText = '';
+    const attempts: string[] = [];
     try {
       if (deep) {
-        // Deep mode: dynamic thinking (no reasoning_effort) — highest quality.
+        // Deep mode: dynamic thinking — native first, then OpenAI-compat fallback.
         try {
-          replyText = await callBrain(apiKey, fullSystem, messages);
-        } catch {
-          // fallback: deep failed → retry in fast mode
-          replyText = await callBrain(apiKey, fullSystem, messages, 'none');
+          replyText = await callBrainNative(apiKey, fullSystem, messages);
+        } catch (e) {
+          attempts.push(String(e instanceof Error ? e.message : e));
+          replyText = await callBrainOpenAI(apiKey, fullSystem, messages);
         }
       } else {
-        // Fast mode: skip thinking; if the endpoint rejects reasoning_effort, retry plain.
+        // Fast mode: skip thinking via thinkingBudget 0 (native), then no-config
+        // native, then OpenAI-compat fast as last resort.
         try {
-          replyText = await callBrain(apiKey, fullSystem, messages, 'none');
-        } catch {
-          replyText = await callBrain(apiKey, fullSystem, messages);
+          replyText = await callBrainNative(apiKey, fullSystem, messages, 0);
+        } catch (e) {
+          attempts.push(String(e instanceof Error ? e.message : e));
+          try {
+            replyText = await callBrainNative(apiKey, fullSystem, messages);
+          } catch (e2) {
+            attempts.push(String(e2 instanceof Error ? e2.message : e2));
+            try {
+              replyText = await callBrainOpenAI(apiKey, fullSystem, messages, 'none');
+            } catch (e3) {
+              attempts.push(String(e3 instanceof Error ? e3.message : e3));
+              replyText = await callBrainOpenAI(apiKey, fullSystem, messages);
+            }
+          }
         }
       }
     } catch (brainErr) {
-      console.error('Gemini brain error:', brainErr);
+      attempts.push(String(brainErr instanceof Error ? brainErr.message : brainErr));
+      console.error('Gemini brain error (all attempts):', attempts.join(' || '));
+      // Surface the real reason so the site owner can diagnose instantly.
+      const firstReason = attempts[0]?.replace(/^Error:\s*/, '').slice(0, 160) || 'unknown error';
       return NextResponse.json(
-        { error: 'KHAN AI is thinking too hard. Give me a moment and ask again.' },
+        { error: `KHAN AI brain error: ${firstReason}` },
         { status: 502 }
       );
     }

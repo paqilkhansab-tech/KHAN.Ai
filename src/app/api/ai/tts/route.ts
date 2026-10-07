@@ -23,6 +23,7 @@ const VOICE = 'Charon'; // deep, informative Gemini prebuilt voice — premium K
 const VOICE_STYLE = 'confident, analytical, professional market-analyst tone';
 const MAX_INPUT_CHARS = 6000; // safety cap (~6 chunks)
 const CHUNK_SIZE = 950;
+const CALL_TIMEOUT_MS = 15_000; // hard cap per TTS call — a hang throws instead of a blind 504
 
 const KEY_MISSING_MESSAGE =
   'Voice engine is not connected yet. Site owner: add GEMINI_API_KEY in Vercel → Settings → Environment Variables (get a free key at aistudio.google.com/apikey), then redeploy.';
@@ -77,13 +78,18 @@ function splitChunks(text: string, maxLen = CHUNK_SIZE): string[] {
 
 /** One Gemini TTS call -> complete WAV buffer (unary responses are audio/wav) */
 async function speakChunk(apiKey: string, text: string): Promise<Buffer> {
-  const res = await fetch(TTS_URL, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'x-goog-api-key': apiKey,
-    },
-    body: JSON.stringify({
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), CALL_TIMEOUT_MS);
+  let res: Response;
+  try {
+    res = await fetch(TTS_URL, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-goog-api-key': apiKey,
+      },
+      signal: ctrl.signal,
+      body: JSON.stringify({
       model: TTS_MODEL,
       input: [
         {
@@ -101,8 +107,11 @@ async function speakChunk(apiKey: string, text: string): Promise<Buffer> {
       generation_config: {
         speech_config: [{ voice: VOICE }],
       },
-    }),
-  });
+      }),
+    });
+  } finally {
+    clearTimeout(timer);
+  }
 
   if (!res.ok) {
     const detail = await res.text().catch(() => '');
@@ -207,7 +216,11 @@ export async function POST(req: NextRequest) {
       },
     });
   } catch (err) {
-    console.error('KHAN TTS error:', err);
-    return NextResponse.json({ error: 'Voice engine unavailable — try again.' }, { status: 500 });
+    const reason = err instanceof Error ? err.message : String(err);
+    console.error('KHAN TTS error:', reason);
+    return NextResponse.json(
+      { error: `Voice engine error: ${reason.slice(0, 140)}` },
+      { status: 500 }
+    );
   }
 }
