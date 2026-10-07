@@ -32,6 +32,15 @@ const INTERACTIONS_URL = 'https://generativelanguage.googleapis.com/v1beta/inter
 const MODEL = process.env.GEMINI_MODEL || 'gemini-3.8-flash';
 const CALL_TIMEOUT_MS = 15_000; // hard cap per brain call
 
+// Model fallback chain — free-tier daily quotas are PER MODEL, so when one
+// model hits its 429 daily limit we hop to the next (verified existing ids).
+// gemini-3.5-flash-lite is Google's recommended lightweight tier replacement
+// for the retired 2.5-flash-lite (higher free limits).
+const MODEL_CHAIN = [MODEL, 'gemini-3.5-flash', 'gemini-3.5-flash-lite']
+  .filter((m, i, a) => Boolean(m) && a.indexOf(m) === i); // env override first, deduped
+
+const BUDGET_MS = 45_000; // total wall-clock budget for all brain attempts
+
 const fmtStockLine = (s: typeof STOCK_BASELINES[number]) =>
   `${s.symbol} (${s.market === 'IN' ? 'India' : 'US'}): ${s.currency === 'INR' ? '₹' : '$'}${s.price.toLocaleString('en-IN')} (${s.changePct >= 0 ? '+' : ''}${s.changePct}%)`;
 
@@ -113,6 +122,7 @@ async function fetchWithTimeout(url: string, init: RequestInit, ms = CALL_TIMEOU
 
 /**
  * One Interactions API text-generation call (x-goog-api-key auth).
+ * model: which Gemini model id to use.
  * thinkingLevel: 'low' = fast mode; undefined = dynamic thinking (deep mode).
  * historySteps replays the full conversation statelessly.
  * lastUserOnly: retry shape that drops history (minimal, always-parseable input).
@@ -121,6 +131,7 @@ async function callBrain(
   apiKey: string,
   system: string,
   historySteps: InteractionStep[],
+  model: string,
   thinkingLevel?: 'low' | 'high',
   lastUserOnly = false
 ): Promise<string> {
@@ -133,7 +144,7 @@ async function callBrain(
       'x-goog-api-key': apiKey,
     },
     body: JSON.stringify({
-      model: MODEL,
+      model,
       system_instruction: system,
       input,
       store: false, // stateless — don't retain conversations on Google servers
@@ -145,8 +156,9 @@ async function callBrain(
 
   if (!res.ok) {
     const detail = await googleErrorDetail(res);
-    const err = new Error(`Gemini interactions ${res.status}${lastUserOnly ? ' (lastUserOnly)' : ''}: ${detail}`);
-    (err as Error & { status?: number }).status = res.status;
+    const err = new Error(`Gemini interactions [${model}] ${res.status}${lastUserOnly ? ' (lastUserOnly)' : ''}: ${detail}`);
+    (err as Error & { status?: number; model?: string }).status = res.status;
+    (err as Error & { model?: string }).model = model;
     throw err;
   }
 
@@ -208,34 +220,43 @@ export async function POST(req: NextRequest) {
     const historySteps = messages.map(toStep);
 
     let replyText = '';
+    let usedModel = '';
     const attempts: string[] = [];
-    try {
-      if (deep) {
-        // Deep mode: dynamic thinking -> retry with history dropped.
+    const startedAt = Date.now();
+
+    // Walk the model chain: free-tier daily quotas are per model, so a 429 on
+    // one model falls through to the next. Other errors retry once with the
+    // minimal last-user-only shape before hopping models. A wall-clock budget
+    // keeps the worst case well inside the 60s serverless cap.
+    outer: for (const model of MODEL_CHAIN) {
+      for (const lastUserOnly of [false, true]) {
+        if (Date.now() - startedAt > BUDGET_MS) break outer;
         try {
-          replyText = await callBrain(apiKey, fullSystem, historySteps);
+          replyText = await callBrain(
+            apiKey,
+            fullSystem,
+            historySteps,
+            model,
+            deep ? undefined : 'low',
+            lastUserOnly
+          );
+          usedModel = model;
+          break outer;
         } catch (e) {
-          attempts.push(String(e instanceof Error ? e.message : e));
-          replyText = await callBrain(apiKey, fullSystem, historySteps, undefined, true);
-        }
-      } else {
-        // Fast mode: thinking_level low -> dynamic -> history dropped.
-        try {
-          replyText = await callBrain(apiKey, fullSystem, historySteps, 'low');
-        } catch (e) {
-          attempts.push(String(e instanceof Error ? e.message : e));
-          try {
-            replyText = await callBrain(apiKey, fullSystem, historySteps);
-          } catch (e2) {
-            attempts.push(String(e2 instanceof Error ? e2.message : e2));
-            replyText = await callBrain(apiKey, fullSystem, historySteps, 'low', true);
-          }
+          const msg = e instanceof Error ? e.message : String(e);
+          attempts.push(msg);
+          const status = (e as Error & { status?: number }).status;
+          if (status === 429) break; // daily quota gone for this model -> next model
+          if (status === 404) break; // model id unknown/unavailable -> next model
+          if (status === 400 && !lastUserOnly) continue; // maybe history shape -> retry minimal
+          if (status && status >= 400 && status < 500 && status !== 408) break outer;
+          // 5xx / network / timeout -> try minimal shape, then next model
         }
       }
-    } catch (brainErr) {
-      attempts.push(String(brainErr instanceof Error ? brainErr.message : brainErr));
+    }
+
+    if (!replyText.trim()) {
       console.error('Gemini brain error (all attempts):', attempts.join(' || '));
-      // Surface the real reason so the site owner can diagnose instantly.
       const firstReason = attempts[0]?.replace(/^Error:\s*/, '').slice(0, 160) || 'unknown error';
       return NextResponse.json(
         { error: `KHAN AI brain error: ${firstReason}` },
@@ -244,6 +265,7 @@ export async function POST(req: NextRequest) {
     }
 
     const reply = replyText.trim() || 'I could not generate a response. Please ask again.';
+    if (usedModel) console.log(`KHAN AI answered via ${usedModel} (attempted: ${attempts.length})`);
     const askedQuestion = messages[messages.length - 1].content.trim();
 
     // Save conversation to database when logged in (real user info storage)
