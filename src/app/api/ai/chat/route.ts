@@ -1,10 +1,23 @@
 import { NextRequest, NextResponse } from 'next/server';
-import ZAI from 'z-ai-web-dev-sdk';
 import { getCurrentUser } from '@/lib/auth';
 import { db } from '@/lib/db';
 import { CRYPTO_BASELINES, STOCK_BASELINES, INDICES } from '@/lib/market-data';
 import { chatSchema, parse } from '@/lib/validation';
 import { rateLimit, clientIp, tooMany } from '@/lib/rate-limit';
+
+/**
+ * KHAN AI BRAIN — Google Gemini 2.5 Flash via plain REST (OpenAI-compatible endpoint).
+ * Zero sandbox SDK — works on any hosting platform (Vercel included).
+ * Requires GEMINI_API_KEY environment variable (free: aistudio.google.com/apikey).
+ * To add a second brain later (e.g. DeepSeek): swap BASE_URL + MODEL — the payload
+ * is standard OpenAI chat-completions shape, nothing else changes.
+ */
+
+// Vercel serverless cap (Hobby allows up to 60s) — deep mode + network need headroom.
+export const maxDuration = 60;
+
+const BASE_URL = 'https://generativelanguage.googleapis.com/v1beta/openai';
+const MODEL = 'gemini-2.5-flash';
 
 const fmtStockLine = (s: typeof STOCK_BASELINES[number]) =>
   `${s.symbol} (${s.market === 'IN' ? 'India' : 'US'}): ${s.currency === 'INR' ? '₹' : '$'}${s.price.toLocaleString('en-IN')} (${s.changePct >= 0 ? '+' : ''}${s.changePct}%)`;
@@ -47,10 +60,57 @@ const KHAN_SYSTEM_PROMPT = `You are KHAN AI — an elite market analyst and trad
 
 ## LIVE MARKET DATA (source of truth, updated feed)`;
 
+/** Friendly message for a missing key — says EXACTLY what to do. */
+const KEY_MISSING_MESSAGE =
+  'KHAN AI brain is not connected yet. Site owner: add GEMINI_API_KEY in Vercel → Settings → Environment Variables (get a free key at aistudio.google.com/apikey), then redeploy.';
+
+type ChatMsg = { role: 'user' | 'assistant'; content: string };
+
+/** One chat-completions call to the Gemini OpenAI-compatible endpoint. */
+async function callBrain(
+  apiKey: string,
+  system: string,
+  messages: ChatMsg[],
+  reasoningEffort?: 'low' | 'medium' | 'high' | 'none'
+): Promise<string> {
+  const res = await fetch(`${BASE_URL}/chat/completions`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${apiKey}`,
+    },
+    body: JSON.stringify({
+      model: MODEL,
+      messages: [{ role: 'system', content: system }, ...messages],
+      // Fast mode skips internal reasoning (near-instant); deep mode lets
+      // Gemini think dynamically (omitting the field = dynamic thinking).
+      ...(reasoningEffort ? { reasoning_effort: reasoningEffort } : {}),
+    }),
+  });
+
+  if (!res.ok) {
+    const detail = await res.text().catch(() => '');
+    const err = new Error(`Gemini ${res.status}: ${detail.slice(0, 300)}`);
+    (err as Error & { status?: number }).status = res.status;
+    throw err;
+  }
+
+  const data = (await res.json()) as {
+    choices?: { message?: { content?: string } }[];
+  };
+  return data.choices?.[0]?.message?.content || '';
+}
+
 export async function POST(req: NextRequest) {
   // AI cost protection: 20 questions / 5 min / IP
   const rl = rateLimit(`aichat:${clientIp(req)}`, 20, 5 * 60_000);
   if (!rl.ok) return tooMany(rl.retryAfter, 'KHAN needs a breather — you have used your AI quota for now. Try again in a few minutes.');
+
+  const apiKey = process.env.GEMINI_API_KEY;
+  if (!apiKey) {
+    console.error('KHAN AI: GEMINI_API_KEY is not set in this environment.');
+    return NextResponse.json({ error: KEY_MISSING_MESSAGE }, { status: 503 });
+  }
 
   try {
     const body = await req.json();
@@ -72,37 +132,33 @@ export async function POST(req: NextRequest) {
     const indexLine = INDICES.map(i => `${i.name}: ${i.price.toLocaleString()} (${i.changePct >= 0 ? '+' : ''}${i.changePct}%)`).join(' | ');
     const fullSystem = `${KHAN_SYSTEM_PROMPT}\n[DEEP_MODE] ${deep ? 'ON — full multi-scenario macro-aware analysis' : 'OFF — fast mode'}\n[CRYPTO] ${cryptoLine}\n[STOCKS] ${stockLine}\n[INDICES] ${indexLine}\n[TIME] ${new Date().toUTCString()}`;
 
-    let zai;
+    let replyText: string;
     try {
-      zai = await ZAI.create();
-    } catch {
-      // AI credentials not configured in this environment (e.g. hosting platform)
+      if (deep) {
+        // Deep mode: dynamic thinking (no reasoning_effort) — highest quality.
+        try {
+          replyText = await callBrain(apiKey, fullSystem, messages);
+        } catch {
+          // fallback: deep failed → retry in fast mode
+          replyText = await callBrain(apiKey, fullSystem, messages, 'none');
+        }
+      } else {
+        // Fast mode: skip thinking; if the endpoint rejects reasoning_effort, retry plain.
+        try {
+          replyText = await callBrain(apiKey, fullSystem, messages, 'none');
+        } catch {
+          replyText = await callBrain(apiKey, fullSystem, messages);
+        }
+      }
+    } catch (brainErr) {
+      console.error('Gemini brain error:', brainErr);
       return NextResponse.json(
-        { error: 'KHAN AI brain is being upgraded — chat will be back shortly. Everything else works!' },
-        { status: 503 }
+        { error: 'KHAN AI is thinking too hard. Give me a moment and ask again.' },
+        { status: 502 }
       );
     }
-    const payload = {
-      messages: [
-        { role: 'assistant' as const, content: fullSystem },
-        ...messages.map(m => ({ role: m.role as 'user' | 'assistant', content: m.content })),
-      ],
-      thinking: { type: deep ? 'enabled' : 'disabled' } as { type: 'enabled' | 'disabled' },
-    };
 
-    let completion;
-    try {
-      completion = await zai.chat.completions.create(payload);
-    } catch (deepErr) {
-      if (deep) {
-        // fallback: if chain-of-thought mode fails, retry in fast mode
-        completion = await zai.chat.completions.create({ ...payload, thinking: { type: 'disabled' } });
-      } else {
-        throw deepErr;
-      }
-    }
-
-    const reply = completion.choices[0]?.message?.content || 'I could not generate a response. Please ask again.';
+    const reply = replyText.trim() || 'I could not generate a response. Please ask again.';
     const askedQuestion = messages[messages.length - 1].content.trim();
 
     // Save conversation to database when logged in (real user info storage)

@@ -1,21 +1,30 @@
 import { NextRequest, NextResponse } from 'next/server';
-import ZAI from 'z-ai-web-dev-sdk';
 import { ttsSchema, parse } from '@/lib/validation';
 import { rateLimit, clientIp, tooMany } from '@/lib/rate-limit';
 
 /**
- * KHAN AI VOICE ENGINE
- * Converts KHAN's markdown analysis into natural spoken audio (mp3).
+ * KHAN AI VOICE ENGINE — Google Gemini native TTS via plain REST.
+ * Zero sandbox SDK — works on any hosting platform (Vercel included).
  * - Strips markdown / emojis / symbols that TTS reads poorly
  * - Converts currency symbols to spoken words ($64,000 -> "64,000 dollars")
- * - Splits long answers at sentence boundaries (API limit: 1024 chars/request)
- * - Concatenates chunk MP3s into one seamless audio response
+ * - Splits long answers at sentence boundaries (per-request input cap)
+ * - Gemini returns raw PCM; we wrap it in a WAV header
+ * - Concatenates chunk WAVs into one seamless audio response
+ * Requires GEMINI_API_KEY environment variable (free: aistudio.google.com/apikey).
  */
 
-const VOICE = 'jam'; // British gentleman — premium KHAN persona
-const SPEED = 1.0;
+// Vercel serverless cap (Hobby allows up to 60s) — multi-chunk voice needs headroom.
+export const maxDuration = 60;
+
+const TTS_URL =
+  'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-tts:generateContent';
+const VOICE = 'CHARON'; // deep, informative Gemini prebuilt voice — premium KHAN analyst persona
 const MAX_INPUT_CHARS = 6000; // safety cap (~6 chunks)
 const CHUNK_SIZE = 950;
+const FALLBACK_SAMPLE_RATE = 24000; // Gemini TTS default PCM rate
+
+const KEY_MISSING_MESSAGE =
+  'Voice engine is not connected yet. Site owner: add GEMINI_API_KEY in Vercel → Settings → Environment Variables (get a free key at aistudio.google.com/apikey), then redeploy.';
 
 /** Convert markdown answer into clean, natural speech text */
 function cleanForSpeech(md: string): string {
@@ -62,7 +71,72 @@ function splitChunks(text: string, maxLen = CHUNK_SIZE): string[] {
     }
   }
   if (cur.trim()) chunks.push(cur.trim());
-  return chunks.slice(0, 8); // hard cap 8 chunks
+  return chunks.slice(0, 6); // hard cap 6 chunks (keeps total time well inside maxDuration)
+}
+
+/** One Gemini TTS call -> decoded PCM buffer + sample rate */
+async function speakChunk(apiKey: string, text: string): Promise<{ pcm: Buffer; sampleRate: number }> {
+  const res = await fetch(TTS_URL, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'x-goog-api-key': apiKey,
+    },
+    body: JSON.stringify({
+      contents: [{ parts: [{ text }] }],
+      generationConfig: {
+        responseModalities: ['AUDIO'],
+        speechConfig: {
+          voiceConfig: {
+            prebuiltVoiceConfig: { voiceName: VOICE },
+          },
+        },
+      },
+    }),
+  });
+
+  if (!res.ok) {
+    const detail = await res.text().catch(() => '');
+    const err = new Error(`Gemini TTS ${res.status}: ${detail.slice(0, 300)}`);
+    (err as Error & { status?: number }).status = res.status;
+    throw err;
+  }
+
+  const data = (await res.json()) as {
+    candidates?: {
+      content?: {
+        parts?: { inlineData?: { mimeType?: string; data?: string } }[];
+      };
+    }[];
+  };
+
+  const inline = data.candidates?.[0]?.content?.parts?.[0]?.inlineData;
+  if (!inline?.data) throw new Error('Gemini TTS returned no audio payload.');
+
+  const pcm = Buffer.from(inline.data, 'base64');
+  // mimeType looks like "audio/L16;codec=pcm;rate=24000"
+  const rateMatch = inline.mimeType?.match(/rate=(\d+)/);
+  const sampleRate = rateMatch ? parseInt(rateMatch[1], 10) : FALLBACK_SAMPLE_RATE;
+  return { pcm, sampleRate };
+}
+
+/** Wrap raw 16-bit mono PCM in a minimal 44-byte WAV header */
+function pcmToWav(pcm: Buffer, sampleRate: number, channels = 1, bits = 16): Buffer {
+  const header = Buffer.alloc(44);
+  header.write('RIFF', 0);
+  header.writeUInt32LE(36 + pcm.length, 4);
+  header.write('WAVE', 8);
+  header.write('fmt ', 12);
+  header.writeUInt32LE(16, 16);
+  header.writeUInt16LE(1, 20); // PCM
+  header.writeUInt16LE(channels, 22);
+  header.writeUInt32LE(sampleRate, 24);
+  header.writeUInt32LE((sampleRate * channels * bits) / 8, 28);
+  header.writeUInt16LE((channels * bits) / 8, 32);
+  header.writeUInt16LE(bits, 34);
+  header.write('data', 36);
+  header.writeUInt32LE(pcm.length, 40);
+  return Buffer.concat([header, pcm]);
 }
 
 /** Extract PCM payload + format info from a WAV buffer (walks RIFF chunks) */
@@ -114,6 +188,12 @@ export async function POST(req: NextRequest) {
   const rl = rateLimit(`tts:${clientIp(req)}`, 15, 5 * 60_000);
   if (!rl.ok) return tooMany(rl.retryAfter, 'Voice quota reached — try again in a few minutes.');
 
+  const apiKey = process.env.GEMINI_API_KEY;
+  if (!apiKey) {
+    console.error('KHAN TTS: GEMINI_API_KEY is not set in this environment.');
+    return NextResponse.json({ error: KEY_MISSING_MESSAGE }, { status: 503 });
+  }
+
   try {
     const body = await req.json().catch(() => ({}));
     const parsed = parse(ttsSchema, body);
@@ -124,24 +204,10 @@ export async function POST(req: NextRequest) {
     }
     const chunks = splitChunks(speech);
 
-    let zai;
-    try {
-      zai = await ZAI.create();
-    } catch {
-      // AI credentials not configured in this environment (e.g. hosting platform)
-      return NextResponse.json({ error: 'Voice engine is being configured — try again shortly.' }, { status: 503 });
-    }
     const buffers: Buffer[] = [];
     for (const chunk of chunks) {
-      const response = await zai.audio.tts.create({
-        input: chunk,
-        voice: VOICE,
-        speed: SPEED,
-        response_format: 'wav',
-        stream: false,
-      });
-      const arrayBuffer = await response.arrayBuffer();
-      buffers.push(Buffer.from(new Uint8Array(arrayBuffer)));
+      const { pcm, sampleRate } = await speakChunk(apiKey, chunk);
+      buffers.push(pcmToWav(pcm, sampleRate)); // normalize every chunk to WAV so merging works
     }
 
     const audio = buffers.length === 1 ? buffers[0] : mergeWav(buffers);
