@@ -17,7 +17,7 @@ import { rateLimit, clientIp, tooMany } from '@/lib/rate-limit';
 export const maxDuration = 60;
 
 const BASE_URL = 'https://generativelanguage.googleapis.com/v1beta/openai';
-const MODEL = 'gemini-2.5-flash';
+const MODEL = 'gemini-3.8-flash';
 
 const fmtStockLine = (s: typeof STOCK_BASELINES[number]) =>
   `${s.symbol} (${s.market === 'IN' ? 'India' : 'US'}): ${s.currency === 'INR' ? '₹' : '$'}${s.price.toLocaleString('en-IN')} (${s.changePct >= 0 ? '+' : ''}${s.changePct}%)`;

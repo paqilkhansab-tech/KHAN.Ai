@@ -3,12 +3,12 @@ import { ttsSchema, parse } from '@/lib/validation';
 import { rateLimit, clientIp, tooMany } from '@/lib/rate-limit';
 
 /**
- * KHAN AI VOICE ENGINE — Google Gemini native TTS via plain REST.
+ * KHAN AI VOICE ENGINE — Google Gemini TTS via plain REST (Interactions API).
  * Zero sandbox SDK — works on any hosting platform (Vercel included).
  * - Strips markdown / emojis / symbols that TTS reads poorly
  * - Converts currency symbols to spoken words ($64,000 -> "64,000 dollars")
  * - Splits long answers at sentence boundaries (per-request input cap)
- * - Gemini returns raw PCM; we wrap it in a WAV header
+ * - Unary requests return complete WAV audio (24 kHz mono 16-bit) — no wrapping needed
  * - Concatenates chunk WAVs into one seamless audio response
  * Requires GEMINI_API_KEY environment variable (free: aistudio.google.com/apikey).
  */
@@ -17,11 +17,12 @@ import { rateLimit, clientIp, tooMany } from '@/lib/rate-limit';
 export const maxDuration = 60;
 
 const TTS_URL =
-  'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-tts:generateContent';
-const VOICE = 'CHARON'; // deep, informative Gemini prebuilt voice — premium KHAN analyst persona
+  'https://generativelanguage.googleapis.com/v1beta/interactions';
+const TTS_MODEL = 'gemini-3.8-flash-tts';
+const VOICE = 'Charon'; // deep, informative Gemini prebuilt voice — premium KHAN analyst persona
+const VOICE_STYLE = 'confident, analytical, professional market-analyst tone';
 const MAX_INPUT_CHARS = 6000; // safety cap (~6 chunks)
 const CHUNK_SIZE = 950;
-const FALLBACK_SAMPLE_RATE = 24000; // Gemini TTS default PCM rate
 
 const KEY_MISSING_MESSAGE =
   'Voice engine is not connected yet. Site owner: add GEMINI_API_KEY in Vercel → Settings → Environment Variables (get a free key at aistudio.google.com/apikey), then redeploy.';
@@ -74,8 +75,8 @@ function splitChunks(text: string, maxLen = CHUNK_SIZE): string[] {
   return chunks.slice(0, 6); // hard cap 6 chunks (keeps total time well inside maxDuration)
 }
 
-/** One Gemini TTS call -> decoded PCM buffer + sample rate */
-async function speakChunk(apiKey: string, text: string): Promise<{ pcm: Buffer; sampleRate: number }> {
+/** One Gemini TTS call -> complete WAV buffer (unary responses are audio/wav) */
+async function speakChunk(apiKey: string, text: string): Promise<Buffer> {
   const res = await fetch(TTS_URL, {
     method: 'POST',
     headers: {
@@ -83,14 +84,22 @@ async function speakChunk(apiKey: string, text: string): Promise<{ pcm: Buffer; 
       'x-goog-api-key': apiKey,
     },
     body: JSON.stringify({
-      contents: [{ parts: [{ text }] }],
-      generationConfig: {
-        responseModalities: ['AUDIO'],
-        speechConfig: {
-          voiceConfig: {
-            prebuiltVoiceConfig: { voiceName: VOICE },
-          },
+      model: TTS_MODEL,
+      input: [
+        {
+          type: 'user_input',
+          content: [
+            {
+              type: 'text',
+              text,
+              annotations: [{ type: 'speech_metadata', style: VOICE_STYLE }],
+            },
+          ],
         },
+      ],
+      response_format: { type: 'audio' },
+      generation_config: {
+        speech_config: [{ voice: VOICE }],
       },
     }),
   });
@@ -103,40 +112,19 @@ async function speakChunk(apiKey: string, text: string): Promise<{ pcm: Buffer; 
   }
 
   const data = (await res.json()) as {
-    candidates?: {
-      content?: {
-        parts?: { inlineData?: { mimeType?: string; data?: string } }[];
-      };
+    steps?: {
+      type?: string;
+      content?: { type?: string; data?: string }[];
     }[];
   };
 
-  const inline = data.candidates?.[0]?.content?.parts?.[0]?.inlineData;
-  if (!inline?.data) throw new Error('Gemini TTS returned no audio payload.');
+  // response shape: steps[] -> model_output -> content[] -> { type: 'audio', data: base64 WAV }
+  const audioBlock = (data.steps || [])
+    .flatMap(s => (s?.type === 'model_output' ? s.content || [] : []))
+    .find(c => c?.type === 'audio' && typeof c.data === 'string' && c.data.length > 0);
+  if (!audioBlock?.data) throw new Error('Gemini TTS returned no audio payload.');
 
-  const pcm = Buffer.from(inline.data, 'base64');
-  // mimeType looks like "audio/L16;codec=pcm;rate=24000"
-  const rateMatch = inline.mimeType?.match(/rate=(\d+)/);
-  const sampleRate = rateMatch ? parseInt(rateMatch[1], 10) : FALLBACK_SAMPLE_RATE;
-  return { pcm, sampleRate };
-}
-
-/** Wrap raw 16-bit mono PCM in a minimal 44-byte WAV header */
-function pcmToWav(pcm: Buffer, sampleRate: number, channels = 1, bits = 16): Buffer {
-  const header = Buffer.alloc(44);
-  header.write('RIFF', 0);
-  header.writeUInt32LE(36 + pcm.length, 4);
-  header.write('WAVE', 8);
-  header.write('fmt ', 12);
-  header.writeUInt32LE(16, 16);
-  header.writeUInt16LE(1, 20); // PCM
-  header.writeUInt16LE(channels, 22);
-  header.writeUInt32LE(sampleRate, 24);
-  header.writeUInt32LE((sampleRate * channels * bits) / 8, 28);
-  header.writeUInt16LE((channels * bits) / 8, 32);
-  header.writeUInt16LE(bits, 34);
-  header.write('data', 36);
-  header.writeUInt32LE(pcm.length, 40);
-  return Buffer.concat([header, pcm]);
+  return Buffer.from(audioBlock.data, 'base64'); // complete WAV (24 kHz mono 16-bit)
 }
 
 /** Extract PCM payload + format info from a WAV buffer (walks RIFF chunks) */
@@ -206,8 +194,7 @@ export async function POST(req: NextRequest) {
 
     const buffers: Buffer[] = [];
     for (const chunk of chunks) {
-      const { pcm, sampleRate } = await speakChunk(apiKey, chunk);
-      buffers.push(pcmToWav(pcm, sampleRate)); // normalize every chunk to WAV so merging works
+      buffers.push(await speakChunk(apiKey, chunk)); // each call returns a complete WAV
     }
 
     const audio = buffers.length === 1 ? buffers[0] : mergeWav(buffers);
