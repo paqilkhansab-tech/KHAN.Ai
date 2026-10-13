@@ -224,46 +224,61 @@ export async function POST(req: NextRequest) {
     const attempts: string[] = [];
     const startedAt = Date.now();
 
-    // Walk the model chain: free-tier daily quotas are per model, so a 429 on
-    // one model falls through to the next. Other errors retry once with the
-    // minimal last-user-only shape before hopping models. A wall-clock budget
-    // keeps the worst case well inside the 60s serverless cap.
-    outer: for (const model of MODEL_CHAIN) {
-      for (const lastUserOnly of [false, true]) {
-        if (Date.now() - startedAt > BUDGET_MS) break outer;
-        try {
-          replyText = await callBrain(
-            apiKey,
-            fullSystem,
-            historySteps,
-            model,
-            deep ? undefined : 'low',
-            lastUserOnly
-          );
-          usedModel = model;
-          break outer;
-        } catch (e) {
-          const msg = e instanceof Error ? e.message : String(e);
-          attempts.push(msg);
-          const status = (e as Error & { status?: number }).status;
-          if (status === 429) break; // daily quota gone for this model -> next model
-          if (status === 404) break; // model id unknown/unavailable -> next model
-          // 500/503 = model down or overloaded (Google-side outage). Retrying
-          // the SAME model nearly always fails again and burns the wall-clock
-          // budget, starving the healthy fallback models. Hop NOW instead.
-          if (status === 500 || status === 503) break;
-          if (status === 400 && !lastUserOnly) continue; // maybe history shape -> retry minimal
-          if (status && status >= 400 && status < 500 && status !== 408) break outer;
-          // network / timeout / 408 -> try minimal shape, then next model
+    // Walk the model chain — in up to 3 sweeps. Free-tier Gemini models share
+    // capacity, so during "high demand" spikes EVERY model can 503 at the same
+    // moment. Google's own advice ("spikes are usually temporary, try again
+    // later") is implemented INSIDE the request: after a full sweep, if the
+    // wall-clock budget still has room, pause briefly and sweep again.
+    // 429/404 mark a model as dead for this request (quota/unavailable).
+    const quotaDead = new Set<string>();
+    outer: for (let pass = 0; pass < 3; pass++) {
+      if (pass > 0) {
+        if (Date.now() - startedAt > BUDGET_MS - 8_000) break outer;
+        await new Promise((r) => setTimeout(r, 2_000)); // let the spike drain
+      }
+      for (const model of MODEL_CHAIN) {
+        if (quotaDead.has(model)) continue;
+        for (const lastUserOnly of pass === 0 ? [false, true] : [false]) {
+          if (Date.now() - startedAt > BUDGET_MS) break outer;
+          try {
+            replyText = await callBrain(
+              apiKey,
+              fullSystem,
+              historySteps,
+              model,
+              deep ? undefined : 'low',
+              lastUserOnly
+            );
+            usedModel = model;
+            break outer;
+          } catch (e) {
+            const msg = e instanceof Error ? e.message : String(e);
+            attempts.push(msg);
+            const status = (e as Error & { status?: number }).status;
+            if (status === 429 || status === 404) {
+              quotaDead.add(model); // daily quota gone / model unavailable
+              break;
+            }
+            // 500/503 = model overloaded (Google-side). Retrying the SAME
+            // model right away nearly always fails too — hop to the next
+            // model now; a later sweep may catch the spike draining.
+            if (status === 500 || status === 503) break;
+            if (status === 400 && !lastUserOnly) continue; // history shape -> retry minimal
+            if (status && status >= 400 && status < 500 && status !== 408) break outer;
+            // network / timeout / 408 -> try minimal shape, then next model
+          }
         }
       }
     }
 
     if (!replyText.trim()) {
       console.error('Gemini brain error (all attempts):', attempts.join(' || '));
-      const firstReason = attempts[0]?.replace(/^Error:\s*/, '').slice(0, 160) || 'unknown error';
+      const reasons = attempts
+        .map((a) => a.replace(/^Error:\s*/, '').slice(0, 110))
+        .slice(0, 4)
+        .join(' || ');
       return NextResponse.json(
-        { error: `KHAN AI brain error: ${firstReason}` },
+        { error: `KHAN AI brain error: ${reasons || 'unknown error'}` },
         { status: 502 }
       );
     }
