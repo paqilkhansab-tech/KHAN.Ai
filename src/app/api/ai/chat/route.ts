@@ -248,9 +248,13 @@ export async function POST(req: NextRequest) {
           const status = (e as Error & { status?: number }).status;
           if (status === 429) break; // daily quota gone for this model -> next model
           if (status === 404) break; // model id unknown/unavailable -> next model
+          // 500/503 = model down or overloaded (Google-side outage). Retrying
+          // the SAME model nearly always fails again and burns the wall-clock
+          // budget, starving the healthy fallback models. Hop NOW instead.
+          if (status === 500 || status === 503) break;
           if (status === 400 && !lastUserOnly) continue; // maybe history shape -> retry minimal
           if (status && status >= 400 && status < 500 && status !== 408) break outer;
-          // 5xx / network / timeout -> try minimal shape, then next model
+          // network / timeout / 408 -> try minimal shape, then next model
         }
       }
     }
