@@ -27,7 +27,7 @@ const devEcho =
   process.env.OTP_DEV_ECHO === 'true' && process.env.NODE_ENV !== 'production';
 
 export async function POST(req: NextRequest) {
-  const ipRl = rateLimit(`forgot:${clientIp(req)}`, 3, 15 * 60_000);
+  const ipRl = await rateLimit(`forgot:${clientIp(req)}`, 3, 15 * 60_000);
   if (!ipRl.ok) return tooMany(ipRl.retryAfter, 'Too many reset requests. Please wait a few minutes.');
 
   try {
@@ -64,7 +64,7 @@ export async function POST(req: NextRequest) {
       return NextResponse.json(GENERIC_OK);
     }
 
-    const mailRl = rateLimit(`forgot-mail:${user.id}`, 3, 15 * 60_000);
+    const mailRl = await rateLimit(`forgot-mail:${user.id}`, 3, 15 * 60_000);
     if (!mailRl.ok) return NextResponse.json(GENERIC_OK); // same generic answer
 
     // 6-digit cryptographically random code

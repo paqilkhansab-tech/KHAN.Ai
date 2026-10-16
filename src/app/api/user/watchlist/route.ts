@@ -13,7 +13,7 @@ export async function GET() {
 }
 
 export async function POST(req: NextRequest) {
-  const rl = rateLimit(`watchlist:${clientIp(req)}`, 30, 60_000);
+  const rl = await rateLimit(`watchlist:${clientIp(req)}`, 30, 60_000);
   if (!rl.ok) return tooMany(rl.retryAfter, 'Slow down a little — try again in a moment.');
 
   const user = await getCurrentUser();

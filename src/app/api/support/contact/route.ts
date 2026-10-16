@@ -7,7 +7,7 @@ import { rateLimit, clientIp, tooMany } from '@/lib/rate-limit';
 
 export async function POST(req: NextRequest) {
   // spam protection: 5 tickets / 10 min / IP
-  const rl = rateLimit(`support:${clientIp(req)}`, 5, 10 * 60_000);
+  const rl = await rateLimit(`support:${clientIp(req)}`, 5, 10 * 60_000);
   if (!rl.ok) return tooMany(rl.retryAfter, 'Too many messages sent. Please wait a few minutes.');
 
   try {

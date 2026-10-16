@@ -16,7 +16,7 @@ import { rateLimit, clientIp, tooMany } from '@/lib/rate-limit';
  * - All other outstanding codes for the account are burned after success
  */
 export async function POST(req: NextRequest) {
-  const rl = rateLimit(`reset:${clientIp(req)}`, 8, 15 * 60_000);
+  const rl = await rateLimit(`reset:${clientIp(req)}`, 8, 15 * 60_000);
   if (!rl.ok) return tooMany(rl.retryAfter, 'Too many attempts. Please wait a few minutes and try again.');
 
   try {

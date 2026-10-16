@@ -188,7 +188,7 @@ async function callBrain(
 
 export async function POST(req: NextRequest) {
   // AI cost protection: 20 questions / 5 min / IP
-  const rl = rateLimit(`aichat:${clientIp(req)}`, 20, 5 * 60_000);
+  const rl = await rateLimit(`aichat:${clientIp(req)}`, 20, 5 * 60_000);
   if (!rl.ok) return tooMany(rl.retryAfter, 'KHAN needs a breather — you have used your AI quota for now. Try again in a few minutes.');
 
   const apiKey = process.env.GEMINI_API_KEY;

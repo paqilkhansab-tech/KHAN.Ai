@@ -10,7 +10,7 @@ const DUMMY_HASH = '$2b$12$kETvLQQCCFpLiLm7faTPC.6qrAkAXp9nlu2gW7.7qTDiLUSqrS0l6
 
 export async function POST(req: NextRequest) {
   // brute-force protection: 10 attempts / 5 min / IP
-  const rl = rateLimit(`signin:${clientIp(req)}`, 10, 5 * 60_000);
+  const rl = await rateLimit(`signin:${clientIp(req)}`, 10, 5 * 60_000);
   if (!rl.ok) return tooMany(rl.retryAfter, 'Too many sign-in attempts. Wait a few minutes and try again.');
 
   try {

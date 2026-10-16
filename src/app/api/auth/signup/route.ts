@@ -7,7 +7,7 @@ import { rateLimit, clientIp, tooMany } from '@/lib/rate-limit';
 
 export async function POST(req: NextRequest) {
   // abuse protection: 8 signups / hour / IP
-  const rl = rateLimit(`signup:${clientIp(req)}`, 8, 60 * 60_000);
+  const rl = await rateLimit(`signup:${clientIp(req)}`, 8, 60 * 60_000);
   if (!rl.ok) return tooMany(rl.retryAfter, 'Too many accounts created from this network. Try again later.');
 
   try {

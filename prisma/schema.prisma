@@ -67,3 +67,15 @@ model PasswordResetOTP {
 
   @@index([userId, used])
 }
+
+// Serverless-safe rate limiting: in-memory counters reset on every lambda
+// instance, so the source of truth lives in the database (one row per
+// key+window). Rows are cleaned up automatically once expired.
+model RateLimit {
+  key         String   @id
+  count       Int      @default(0)
+  windowStart DateTime
+  expiresAt   DateTime
+
+  @@index([expiresAt])
+}

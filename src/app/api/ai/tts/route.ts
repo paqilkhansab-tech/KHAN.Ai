@@ -182,7 +182,7 @@ function mergeWav(buffers: Buffer[]): Buffer {
 
 export async function POST(req: NextRequest) {
   // voice generation is expensive: 15 requests / 5 min / IP
-  const rl = rateLimit(`tts:${clientIp(req)}`, 15, 5 * 60_000);
+  const rl = await rateLimit(`tts:${clientIp(req)}`, 15, 5 * 60_000);
   if (!rl.ok) return tooMany(rl.retryAfter, 'Voice quota reached — try again in a few minutes.');
 
   const apiKey = process.env.GEMINI_API_KEY;

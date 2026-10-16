@@ -5,7 +5,7 @@ import { profileSchema, parse } from '@/lib/validation';
 import { rateLimit, clientIp, tooMany } from '@/lib/rate-limit';
 
 export async function PATCH(req: NextRequest) {
-  const rl = rateLimit(`profile:${clientIp(req)}`, 15, 60_000);
+  const rl = await rateLimit(`profile:${clientIp(req)}`, 15, 60_000);
   if (!rl.ok) return tooMany(rl.retryAfter, 'Too many updates. Try again in a minute.');
 
   const user = await getCurrentUser();
