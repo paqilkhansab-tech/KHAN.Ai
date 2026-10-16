@@ -17,11 +17,17 @@ import { jwtVerify } from 'jose';
  * directly with jose (the same secret/algorithm used by src/lib/auth.ts).
  */
 
+// Built-in owner account — hardcoded so the admin panel can never be locked
+// out by a missing or typo'd ADMIN_EMAILS env var. Extendable via ADMIN_EMAILS
+// (comma-separated extra emails). All comparisons are lowercase.
+const BUILT_IN_ADMINS = ['paqilkhansab@gmail.com'];
+
 function adminAllowlist(): string[] {
-  return (process.env.ADMIN_EMAILS || '')
+  const envList = (process.env.ADMIN_EMAILS || '')
     .split(',')
     .map(e => e.trim().toLowerCase())
     .filter(Boolean);
+  return [...new Set([...BUILT_IN_ADMINS, ...envList])];
 }
 
 export async function middleware(req: NextRequest) {

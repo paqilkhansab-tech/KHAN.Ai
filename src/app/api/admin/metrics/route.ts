@@ -20,11 +20,16 @@ import { db } from '@/lib/db';
  *                       lastLoginAt = explicit sign-in event.
  * - engaged*          users with at least one watchlist item / AI chat message
  */
+// Built-in owner account — hardcoded so the metrics API can never be locked
+// out by a missing or typo'd ADMIN_EMAILS env var (mirrors src/middleware.ts).
+const BUILT_IN_ADMINS = ['paqilkhansab@gmail.com'];
+
 function adminAllowlist(): string[] {
-  return (process.env.ADMIN_EMAILS || '')
+  const envList = (process.env.ADMIN_EMAILS || '')
     .split(',')
     .map((e) => e.trim().toLowerCase())
     .filter(Boolean);
+  return [...new Set([...BUILT_IN_ADMINS, ...envList])];
 }
 
 export async function GET(_req: NextRequest) {
