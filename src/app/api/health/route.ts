@@ -22,6 +22,10 @@ const ERROR_MEANINGS: Record<string, string> = {
   P1012: "DATABASE_URL is invalid for PostgreSQL (e.g. it still points to a file: URL). Paste the postgresql:// connection string.",
 };
 
+// same built-in owner allowlist as src/middleware.ts + /api/admin/metrics
+// (anti-lockout: admin detail stays reachable even if ADMIN_EMAILS is unset)
+const BUILT_IN_ADMINS = ['paqilkhansab@gmail.com'];
+
 function adminAllowlist(): string[] {
   return (process.env.ADMIN_EMAILS || '')
     .split(',')
@@ -32,7 +36,7 @@ function adminAllowlist(): string[] {
 export async function GET() {
   const url = process.env.DATABASE_URL || '';
   const me = await getCurrentUser();
-  const isAdmin = Boolean(me && adminAllowlist().includes(me.email.toLowerCase()));
+  const isAdmin = Boolean(me && adminAllowlist().concat(BUILT_IN_ADMINS).includes(me.email.toLowerCase()));
 
   if (!url) {
     return NextResponse.json(
