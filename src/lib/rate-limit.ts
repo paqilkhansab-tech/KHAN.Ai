@@ -21,6 +21,36 @@ type Bucket = { hits: number[]; };
 const store = new Map<string, Bucket>();
 let lastSweep = Date.now();
 
+// bootstrap flag — one DDL guard per lambda instance lifetime
+let tableReady = false;
+
+/**
+ * Make sure the RateLimit table exists (idempotent, safe to race).
+ * Environments whose build command skips `prisma db push` (e.g. a dashboard
+ * build-command override) would otherwise make every L2 query fail and the
+ * limiter silently degrade to per-instance memory. This keeps rate limiting
+ * accurate on ANY deployment with zero manual steps.
+ */
+async function ensureTable(): Promise<boolean> {
+  if (tableReady) return true;
+  try {
+    await db.$executeRawUnsafe(
+      'CREATE TABLE IF NOT EXISTS "RateLimit" (' +
+      '"key" TEXT NOT NULL PRIMARY KEY, ' +
+      '"count" INTEGER NOT NULL DEFAULT 0, ' +
+      '"windowStart" TIMESTAMP(3) NOT NULL, ' +
+      '"expiresAt" TIMESTAMP(3) NOT NULL)'
+    );
+    await db.$executeRawUnsafe(
+      'CREATE INDEX IF NOT EXISTS "RateLimit_expiresAt_idx" ON "RateLimit"("expiresAt")'
+    );
+    tableReady = true;
+    return true;
+  } catch {
+    return false; // DB unreachable right now — memory layer still protects
+  }
+}
+
 function sweepMemory(now: number, windowMs: number) {
   // periodic sweep to keep memory bounded (every ~2 min)
   if (now - lastSweep < 120_000) return;
@@ -63,6 +93,7 @@ async function dbLimit(key: string, limit: number, windowMs: number): Promise<Ra
   const winEnd = new Date(Math.floor(now / windowMs) * windowMs + windowMs);
 
   try {
+    if (!(await ensureTable())) return null;
     // opportunistic cleanup of long-expired rows (cheap, indexed, sampled)
     if (now - lastSweep > 120_000) {
       lastSweep = now; // shared with memory sweep — one sweep pass covers both
